@@ -142,20 +142,25 @@ end
 -- actual drag the cursor leaves the (usually small) handle almost
 -- immediately, which silently stops the drag. Only InputBegan (to detect
 -- the press starting on the handle) needs to be scoped to `handle`.
-local function MakeDraggable(frame, handle)
+-- `track`, if given, is called with every connection made to the GLOBAL
+-- UserInputService so the caller can disconnect them later (destroying
+-- `frame` does NOT disconnect these on its own — see AllConnections/Track
+-- in CreateWindow for why that matters).
+local function MakeDraggable(frame, handle, track)
 	handle = handle or frame
 	local dragging = false
 	local dragStart, startPos
+	track = track or function(conn) return conn end
 
-	handle.InputBegan:Connect(function(input)
+	track(handle.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
 			startPos = frame.Position
 		end
-	end)
+	end))
 
-	UserInputService.InputChanged:Connect(function(input)
+	track(UserInputService.InputChanged:Connect(function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
 			frame.Position = UDim2.new(
@@ -163,13 +168,13 @@ local function MakeDraggable(frame, handle)
 				startPos.Y.Scale, startPos.Y.Offset + delta.Y
 			)
 		end
-	end)
+	end))
 
-	UserInputService.InputEnded:Connect(function(input)
+	track(UserInputService.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
-	end)
+	end))
 end
 
 -- Roblox's native UIShadow instance (a UI modifier, like UICorner/UIStroke —
@@ -649,6 +654,22 @@ function NovaUI:CreateWindow(config)
 	local railWidth = config.TabWidth or 64
 	local topBarHeight = 64
 
+	-- Every connection this window makes to a GLOBAL, persistent service
+	-- (UserInputService, Workspace) gets tracked here and explicitly
+	-- disconnected in Window:Destroy(). Destroying the ScreenGui only
+	-- auto-disconnects listeners on the destroyed instances themselves —
+	-- it does nothing for connections on services that outlive the GUI, so
+	-- without this, every drag handle / slider / colorpicker / keybind's
+	-- UserInputService.InputChanged connection would keep firing (and
+	-- keeping the whole destroyed UI tree alive in memory) forever, for as
+	-- long as the game runs — the classic Roblox leak pattern, and worse
+	-- the more times a window gets created/destroyed in one session.
+	local AllConnections = {}
+	local function Track(conn)
+		table.insert(AllConnections, conn)
+		return conn
+	end
+
 	local ScreenGui = New("ScreenGui", {
 		Name = "NovaUI",
 		ResetOnSpawn = false,
@@ -1123,7 +1144,32 @@ function NovaUI:CreateWindow(config)
 	Pad(SelectorList, 4)
 	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorList })
 
-	-- Save-config button, right next to the selector pill. Fires
+	-- Create-config button, right next to the selector pill. Opens a
+	-- Dialog with a name input; wired up (with Window:Dialog + ConfigSelector)
+	-- further below once those exist.
+	local CreateConfigBtn = New("TextButton", {
+		Text = "",
+		BackgroundColor3 = theme.ElementBackground,
+		Size = UDim2.new(0, 36, 1, 0),
+		AutoButtonColor = false,
+		LayoutOrder = 3,
+		ZIndex = 2,
+		Parent = TopBarRow,
+	})
+	Round(CreateConfigBtn, 8)
+	local createConfigIconHandle = SetButtonIcon(CreateConfigBtn, "file-plus-corner", "+", 14, theme.SubText)
+	AddHoverScale(CreateConfigBtn, 1.06)
+	CreateConfigBtn.MouseEnter:Connect(function()
+		Tween(CreateConfigBtn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+		createConfigIconHandle.SetColor(theme.Text)
+	end)
+	CreateConfigBtn.MouseLeave:Connect(function()
+		Tween(CreateConfigBtn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
+		createConfigIconHandle.SetColor(theme.SubText)
+	end)
+	AttachTooltip(CreateConfigBtn, "Create Config")
+
+	-- Save-config button, right next to it. Fires
 	-- Window.ConfigSelector:OnSave(fn) — hook up your own SaveManager-style
 	-- persistence logic there.
 	local SaveConfigBtn = New("TextButton", {
@@ -1131,7 +1177,7 @@ function NovaUI:CreateWindow(config)
 		BackgroundColor3 = theme.ElementBackground,
 		Size = UDim2.new(0, 36, 1, 0),
 		AutoButtonColor = false,
-		LayoutOrder = 3,
+		LayoutOrder = 4,
 		ZIndex = 2,
 		Parent = TopBarRow,
 	})
@@ -1158,7 +1204,7 @@ function NovaUI:CreateWindow(config)
 	local TopBarSpacer = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, 0, 1, 0),
-		LayoutOrder = 4,
+		LayoutOrder = 5,
 		Parent = TopBarRow,
 	})
 	New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = TopBarSpacer })
@@ -1170,7 +1216,7 @@ function NovaUI:CreateWindow(config)
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, 82, 1, 0),
-		LayoutOrder = 5,
+		LayoutOrder = 6,
 		ZIndex = 2,
 		Parent = TopBarRow,
 	})
@@ -1198,8 +1244,8 @@ function NovaUI:CreateWindow(config)
 		CloseBtn.SetColor(Color3.fromRGB(255, 100, 100))
 	end)
 
-	MakeDraggable(Main, LogoBox)
-	MakeDraggable(Main, TopBarSpacer)
+	MakeDraggable(Main, LogoBox, Track)
+	MakeDraggable(Main, TopBarSpacer, Track)
 
 	local PagesContainer = New("Frame", {
 		Name = "Pages",
@@ -1269,7 +1315,24 @@ function NovaUI:CreateWindow(config)
 	function Window:ToggleMinimize()
 		self._minimized = not self._minimized
 		if self._minimized then
-			self._preMinimizeSize = Main.Size
+			if self._fullscreen then
+				-- Can't be both at once — drop out of fullscreen first (and
+				-- stop its live viewport tracking, which would otherwise
+				-- keep fighting the minimized size) before collapsing.
+				self._fullscreen = false
+				if self._viewportConn then
+					self._viewportConn:Disconnect()
+					self._viewportConn = nil
+				end
+				if self._cameraConn then
+					self._cameraConn:Disconnect()
+					self._cameraConn = nil
+				end
+				FullscreenBtn.SetIcon("expand", "\226\150\162")
+				self._preMinimizeSize = self._savedSize or self._fullSize
+			else
+				self._preMinimizeSize = Main.Size
+			end
 			ResizeKeepingTopLeft(UDim2.new(0, self._fullSize.X.Offset, 0, topBarHeight), 0.18, EASE_SOFT)
 			Sidebar.Visible = false
 			PagesContainer.Visible = false
@@ -1323,7 +1386,20 @@ function NovaUI:CreateWindow(config)
 	function Window:ToggleFullscreen()
 		self._fullscreen = not self._fullscreen
 		if self._fullscreen then
-			self._savedSize = Main.Size
+			-- Minimized hides Sidebar/PagesContainer and shrinks ContentArea
+			-- to fill the collapsed bar. Going fullscreen from that state
+			-- must restore those first, or the window just grows huge with
+			-- no pages/sidebar visible inside it. Restore to the size it
+			-- had before minimizing (not the tiny minimized bar) once
+			-- fullscreen is exited too.
+			if self._minimized then
+				self._minimized = false
+				Sidebar.Visible = true
+				PagesContainer.Visible = true
+				ContentArea.Position = UDim2.new(0, railWidth, 0, 0)
+				ContentArea.Size = UDim2.new(1, -railWidth, 1, 0)
+			end
+			self._savedSize = self._preMinimizeSize or Main.Size
 			self._savedPosition = Main.Position
 			ResizeHandle.Visible = false
 			ApplyViewportSize(self, true)
@@ -1367,15 +1443,15 @@ function NovaUI:CreateWindow(config)
 		local resizing = false
 		local resizeStart, startSize
 
-		ResizeHandle.InputBegan:Connect(function(input)
+		Track(ResizeHandle.InputBegan:Connect(function(input)
 			if Window._minimized or Window._fullscreen then return end
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 				resizing = true
 				resizeStart = input.Position
 				startSize = Main.Size
 			end
-		end)
-		UserInputService.InputChanged:Connect(function(input)
+		end))
+		Track(UserInputService.InputChanged:Connect(function(input)
 			if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 				local delta = input.Position - resizeStart
 				local newWidth = math.max(MIN_WIDTH, startSize.X.Offset + delta.X)
@@ -1384,26 +1460,37 @@ function NovaUI:CreateWindow(config)
 				Main.Size = newSize
 				Window._fullSize = newSize
 			end
-		end)
-		UserInputService.InputEnded:Connect(function(input)
+		end))
+		Track(UserInputService.InputEnded:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 				resizing = false
 			end
-		end)
+		end))
 	end
 
 	if config.MinimizeKey then
-		UserInputService.InputBegan:Connect(function(input, processed)
+		Track(UserInputService.InputBegan:Connect(function(input, processed)
 			if processed then return end
 			if input.KeyCode == config.MinimizeKey then
 				Window:ToggleMinimize()
 			end
-		end)
+		end))
 	end
 
 	function Window:Destroy()
 		ClosePopup()
 		DisconnectFullscreenTracking(self)
+		-- Destroying ScreenGui cleans up every connection made ON an
+		-- instance inside it, but NOT connections made on global services
+		-- (UserInputService, Workspace) — those live independently of the
+		-- GUI and would otherwise keep firing (and keep this whole UI tree
+		-- referenced/alive) forever. See AllConnections/Track above.
+		for _, conn in ipairs(AllConnections) do
+			if conn.Connected then
+				conn:Disconnect()
+			end
+		end
+		table.clear(AllConnections)
 		ScreenGui:Destroy()
 	end
 
@@ -1534,6 +1621,24 @@ function NovaUI:CreateWindow(config)
 	SaveConfigBtn.MouseButton1Click:Connect(function()
 		ConfigSelector.Save:Fire(ConfigSelector.Value, NovaUI:ExportConfigJSON())
 	end)
+	CreateConfigBtn.MouseButton1Click:Connect(function()
+		Window:Dialog({
+			Title = "Create Config",
+			Input = { Placeholder = "Config name" },
+			Buttons = {
+				{ Title = "Cancel", Callback = function() end },
+				{
+					Title = "Create",
+					Callback = function(name)
+						name = name and name:gsub("^%s+", ""):gsub("%s+$", "")
+						if not name or name == "" then return end
+						ConfigSelector:AddOption(name)
+						ConfigSelector:SetValue(name)
+					end,
+				},
+			},
+		})
+	end)
 	Window.ConfigSelector = ConfigSelector
 	Window.Search = { Box = SearchBox }
 
@@ -1572,7 +1677,10 @@ function NovaUI:CreateWindow(config)
 		ApplySearchFilter()
 	end
 
-	--- Window:Dialog({ Title, Content, Buttons = {{Title, Callback}, ...} })
+	--- Window:Dialog({ Title, Content, Input = { Placeholder, Default },
+	---   Buttons = {{Title, Callback}, ...} })
+	--- If Input is given, every button's Callback is invoked with the
+	--- input box's current text as its only argument (nil otherwise).
 	function Window:Dialog(cfg)
 		local overlay = New("Frame", {
 			BackgroundColor3 = Color3.new(0, 0, 0),
@@ -1630,11 +1738,52 @@ function NovaUI:CreateWindow(config)
 			})
 		end
 
+		-- cfg.Input = { Placeholder, Default } adds a text field to the
+		-- dialog; every button's Callback is then called with the box's
+		-- current text as its argument (nil if there's no Input at all).
+		local inputBox
+		if cfg.Input then
+			local inputCfg = cfg.Input
+			local inputHolder = New("Frame", {
+				BackgroundColor3 = theme.ElementBackgroundHover,
+				Size = UDim2.new(1, 0, 0, 32),
+				ZIndex = 51,
+				LayoutOrder = 3,
+				Parent = box,
+			})
+			Round(inputHolder, 6)
+			Pad(inputHolder, 10, 0, 10, 0)
+			local inputStroke = Stroke(inputHolder, theme.Accent, 1.5, 1)
+			inputBox = New("TextBox", {
+				Text = inputCfg.Default or "",
+				PlaceholderText = inputCfg.Placeholder or "",
+				Font = Enum.Font.Gotham,
+				TextSize = 13,
+				TextColor3 = theme.Text,
+				PlaceholderColor3 = theme.SubText,
+				ClearTextOnFocus = false,
+				BackgroundTransparency = 1,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Size = UDim2.new(1, 0, 1, 0),
+				ZIndex = 51,
+				Parent = inputHolder,
+			})
+			inputBox.Focused:Connect(function()
+				Tween(inputStroke, { Transparency = 0 }, 0.12)
+			end)
+			inputBox.FocusLost:Connect(function()
+				Tween(inputStroke, { Transparency = 1 }, 0.15)
+			end)
+			task.defer(function()
+				inputBox:CaptureFocus()
+			end)
+		end
+
 		local btnRow = New("Frame", {
 			BackgroundTransparency = 1,
 			Size = UDim2.new(1, 0, 0, 32),
 			ZIndex = 51,
-			LayoutOrder = 3,
+			LayoutOrder = 4,
 			Parent = box,
 		})
 		New("UIListLayout", {
@@ -1672,7 +1821,9 @@ function NovaUI:CreateWindow(config)
 				task.delay(0.12, function()
 					overlay:Destroy()
 				end)
-				if btnCfg.Callback then btnCfg.Callback() end
+				if btnCfg.Callback then
+					btnCfg.Callback(inputBox and inputBox.Text or nil)
+				end
 			end)
 		end
 	end
@@ -2113,16 +2264,16 @@ function NovaUI:CreateWindow(config)
 						UpdateFromInputPos(input.Position.X)
 					end
 				end)
-				UserInputService.InputChanged:Connect(function(input)
+				Track(UserInputService.InputChanged:Connect(function(input)
 					if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 						UpdateFromInputPos(input.Position.X)
 					end
-				end)
-				UserInputService.InputEnded:Connect(function(input)
+				end))
+				Track(UserInputService.InputEnded:Connect(function(input)
 					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 						dragging = false
 					end
-				end)
+				end))
 
 				if id then NovaUI.Options[id] = Slider end
 				return Slider
@@ -2521,12 +2672,12 @@ function NovaUI:CreateWindow(config)
 						end
 					end)
 				end
-				UserInputService.InputEnded:Connect(function(input)
+				Track(UserInputService.InputEnded:Connect(function(input)
 					if input.UserInputType == Enum.UserInputType.MouseButton1 then
 						draggingSV, draggingHue, draggingAlpha = false, false, false
 					end
-				end)
-				UserInputService.InputChanged:Connect(function(input)
+				end))
+				Track(UserInputService.InputChanged:Connect(function(input)
 					if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
 					if draggingSV then
 						s = math.clamp((input.Position.X - svBox.AbsolutePosition.X) / svBox.AbsoluteSize.X, 0, 1)
@@ -2539,7 +2690,7 @@ function NovaUI:CreateWindow(config)
 						Colorpicker.Transparency = 1 - math.clamp((input.Position.X - alphaBar.AbsolutePosition.X) / alphaBar.AbsoluteSize.X, 0, 1)
 						Render()
 					end
-				end)
+				end))
 
 				swatch.MouseButton1Click:Connect(function()
 					-- Re-sync h/s/v from the *current* Value every time the
@@ -2605,7 +2756,7 @@ function NovaUI:CreateWindow(config)
 					keyBtn.Text = "..."
 				end)
 
-				UserInputService.InputBegan:Connect(function(input, processed)
+				Track(UserInputService.InputBegan:Connect(function(input, processed)
 					if Keybind._listening then
 						local keyName
 						if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
@@ -2639,9 +2790,9 @@ function NovaUI:CreateWindow(config)
 							if cfg.Callback then cfg.Callback(true) end
 						end
 					end
-				end)
+				end))
 
-				UserInputService.InputEnded:Connect(function(input)
+				Track(UserInputService.InputEnded:Connect(function(input)
 					if Keybind.Mode ~= "Hold" then return end
 					local keyName
 					if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
@@ -2651,7 +2802,7 @@ function NovaUI:CreateWindow(config)
 						Keybind._state = false
 						if cfg.Callback then cfg.Callback(false) end
 					end
-				end)
+				end))
 
 				if id then NovaUI.Options[id] = Keybind end
 				return Keybind
