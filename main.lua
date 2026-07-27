@@ -12,15 +12,26 @@
 	Icons: optional integration with latte-soft/lucide-roblox
 	(https://github.com/latte-soft/lucide-roblox). If a "Lucide" ModuleScript
 	is found under ReplicatedStorage (or passed via CreateWindow's
-	`IconProvider` option / NovaUI:SetIconProvider), sidebar tab icons and a
-	few chrome icons (search, folder, chevron, close) render using it.
-	Without it, everything still works — icons just fall back to plain text/
-	initials so the library has no hard dependency.
+	`IconProvider` option / NovaUI:SetIconProvider), tab icons and every
+	chrome icon (search, folder, chevron, minimize, fullscreen, close,
+	notification close) render as real Lucide glyphs. The bottom-of-sidebar
+	buttons are fully customizable Lucide icon buttons too — see
+	`config.SidebarButtons` / `Window:AddSidebarButton`. Without a provider,
+	everything still works — icons just fall back to plain text glyphs so
+	the library has no hard dependency.
+
+	Depth & motion: windows get a soft UIShadow (AddShadow utility, reusable
+	on your own frames) plus a pop-in open animation; tabs slide when
+	switched; dropdowns/popups/notifications pop and fade in; sidebar and
+	chrome buttons get a hover "scale pop"; cards/rows fade+rise in on
+	creation.
 
 	Components:
-		Window, Tab, Section/Row (grouped settings list), Paragraph, Button,
+		Window (+ fullscreen/minimize/close, draggable, customizable sidebar
+		buttons), Tab, Section/Row (grouped settings list), Paragraph, Button,
 		Toggle, Slider, Dropdown (single/multi), Colorpicker (with optional
-		transparency), Keybind, Input, Notify, Dialog
+		transparency), Keybind, Input, Notify (with shadow + auto-dismiss
+		progress bar), Dialog
 
 	Theme: dark background with a blue accent (see Themes.Dark below).
 	You can swap NovaUI.Theme for your own table with the same keys.
@@ -30,6 +41,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -134,6 +146,70 @@ local function MakeDraggable(frame, handle)
 	end)
 end
 
+-- Uses Roblox's native UIShadow instance (a UI modifier, like UICorner/
+-- UIStroke — it doesn't participate in UIListLayout and isn't clipped by
+-- its own parent's ClipsDescendants, so it can just be added directly to
+-- whatever Frame should cast the shadow, no wrapper frame needed.
+-- opts: Color, Transparency, OffsetX/OffsetY (pixels), Blur (pixels),
+-- Spread (UDim2, grows the shadow beyond the parent's bounds), ZIndex.
+local function AddShadow(parent, opts)
+	opts = opts or {}
+	local shadow = New("UIShadow", {
+		Color = opts.Color or Color3.new(0, 0, 0),
+		Transparency = opts.Transparency or 0.6,
+		Offset = UDim2.fromOffset(opts.OffsetX or 0, opts.OffsetY or 6),
+		Spread = opts.Spread or UDim2.fromScale(0, 0),
+		BlurRadius = UDim.new(0, opts.Blur or 24),
+		ZIndex = opts.ZIndex or 0,
+		Enabled = opts.Enabled ~= false,
+		Parent = parent,
+	})
+	return shadow
+end
+
+-- Adds a small "pop" scale animation on hover/press — used on icon buttons
+-- throughout the sidebar/chrome for a snappier feel.
+local function AddHoverScale(button, scaleUp)
+	scaleUp = scaleUp or 1.06
+	local uiScale = New("UIScale", { Scale = 1, Parent = button })
+	button.MouseEnter:Connect(function()
+		Tween(uiScale, { Scale = scaleUp }, 0.12, Enum.EasingStyle.Back)
+	end)
+	button.MouseLeave:Connect(function()
+		Tween(uiScale, { Scale = 1 }, 0.12)
+	end)
+	button.MouseButton1Down:Connect(function()
+		Tween(uiScale, { Scale = scaleUp * 0.92 }, 0.08)
+	end)
+	button.MouseButton1Up:Connect(function()
+		Tween(uiScale, { Scale = scaleUp }, 0.08)
+	end)
+	return uiScale
+end
+
+-- Quick "pop in" grow animation for popups/dropdown lists when they open.
+local function PopIn(frame)
+	local scale = frame:FindFirstChildOfClass("UIScale")
+	if not scale then
+		scale = New("UIScale", { Scale = 1, Parent = frame })
+	end
+	scale.Scale = 0.88
+	Tween(scale, { Scale = 1 }, 0.15, Enum.EasingStyle.Back)
+end
+
+-- Subtle fade + rise-in animation for newly created cards/rows.
+local function AppearAnimate(inst, delayTime)
+	local originalPosition = inst.Position
+	local originalTransparency = inst.BackgroundTransparency
+	inst.Position = originalPosition + UDim2.new(0, 0, 0, 6)
+	inst.BackgroundTransparency = 1
+	task.delay(delayTime or 0, function()
+		if inst and inst.Parent then
+			Tween(inst, { Position = originalPosition, BackgroundTransparency = originalTransparency }, 0.22, Enum.EasingStyle.Quint)
+		end
+	end)
+end
+
 -- Minimal signal/event implementation used by every element (:OnChanged, :OnClick, ...)
 local Signal = {}
 Signal.__index = Signal
@@ -206,6 +282,39 @@ local function GetIcon(name, size, propsOverrides)
 	return nil
 end
 
+-- Sets a button's visible content to a Lucide icon when available, falling
+-- back to a text glyph otherwise. Used for close/minimize/fullscreen/search/
+-- chevron buttons and any customizable icon button (e.g. sidebar buttons).
+-- Returns a handle with :SetColor(color) so callers can recolor on hover
+-- without caring whether it rendered as an image or as text.
+local function SetButtonIcon(button, iconName, fallbackText, size, color)
+	local existing = button:FindFirstChild("__Icon")
+	if existing then existing:Destroy() end
+
+	local icon = iconName and GetIcon(iconName, size or 14)
+	if icon then
+		icon.Name = "__Icon"
+		icon.AnchorPoint = Vector2.new(0.5, 0.5)
+		icon.Position = UDim2.new(0.5, 0, 0.5, 0)
+		icon.ImageColor3 = color or Color3.new(1, 1, 1)
+		icon.Parent = button
+		button.Text = ""
+	else
+		button.Text = fallbackText or ""
+		button.TextColor3 = color or Color3.new(1, 1, 1)
+	end
+
+	return {
+		SetColor = function(c)
+			if icon then
+				icon.ImageColor3 = c
+			else
+				button.TextColor3 = c
+			end
+		end,
+	}
+end
+
 local NotifHolder -- created lazily, one per Library instance
 
 local function EnsureNotifHolder()
@@ -247,27 +356,54 @@ function NovaUI:Notify(config)
 	local theme = NovaUI.Theme
 	local holder = EnsureNotifHolder()
 
+	-- `card` is the actual list item. UIShadow is a UI modifier (like
+	-- UICorner/UIStroke) so it can sit directly on `card` without being
+	-- swept into `content`'s UIListLayout or clipped by ClipsDescendants.
 	local card = New("Frame", {
 		BackgroundColor3 = theme.SecondaryBackground,
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
+		ClipsDescendants = true,
 		LayoutOrder = -os.clock(),
 		Parent = holder,
 	})
 	Round(card, 8)
 	Stroke(card, theme.Border, 1)
-	Pad(card, 12)
+	local shadow = AddShadow(card, { Transparency = 1, OffsetY = 6, Blur = 18 })
 
-	New("UIListLayout", {
-		SortOrder = Enum.SortOrder.LayoutOrder,
-		Padding = UDim.new(0, 2),
-		Parent = card,
-	})
-
+	-- Left accent strip — a plain absolutely-positioned sibling of `content`,
+	-- so it isn't pulled into the vertical list flow below.
 	New("Frame", {
 		BackgroundColor3 = theme.Accent,
 		Size = UDim2.new(0, 3, 1, 0),
 		Parent = card,
+	})
+
+	local closeBtn = New("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -10, 0, 10),
+		Size = UDim2.new(0, 18, 0, 18),
+		AutoButtonColor = false,
+		ZIndex = 2,
+		Parent = card,
+	})
+	SetButtonIcon(closeBtn, "x", "\226\156\149", 11, theme.SubText)
+
+	-- All the actual title/body text lives in here, where the UIListLayout
+	-- only ever sees text labels — not the accent strip or close button.
+	local content = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = card,
+	})
+	Pad(content, 12, 12, 12, 14)
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 2),
+		Parent = content,
 	})
 
 	New("TextLabel", {
@@ -277,9 +413,9 @@ function NovaUI:Notify(config)
 		TextColor3 = theme.Text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, 18),
+		Size = UDim2.new(1, -22, 0, 18),
 		LayoutOrder = 1,
-		Parent = card,
+		Parent = content,
 	})
 
 	if config.Content then
@@ -294,7 +430,7 @@ function NovaUI:Notify(config)
 			Size = UDim2.new(1, 0, 0, 0),
 			AutomaticSize = Enum.AutomaticSize.Y,
 			LayoutOrder = 2,
-			Parent = card,
+			Parent = content,
 		})
 	end
 
@@ -311,22 +447,49 @@ function NovaUI:Notify(config)
 			Size = UDim2.new(1, 0, 0, 0),
 			AutomaticSize = Enum.AutomaticSize.Y,
 			LayoutOrder = 3,
-			Parent = card,
+			Parent = content,
 		})
 	end
 
+	local progressFill
+	if config.Duration then
+		local progressTrack = New("Frame", {
+			BackgroundColor3 = theme.ElementBackgroundHover,
+			Position = UDim2.new(0, -12, 1, 2),
+			Size = UDim2.new(1, 24, 0, 3),
+			LayoutOrder = 99,
+			Parent = content,
+		})
+		Round(progressTrack, 2)
+		progressFill = New("Frame", {
+			BackgroundColor3 = theme.Accent,
+			Size = UDim2.new(1, 0, 1, 0),
+			Parent = progressTrack,
+		})
+		Round(progressFill, 2)
+	end
+
+	local function Dismiss()
+		if not (card and card.Parent) then return end
+		Tween(card, { Position = UDim2.new(1, 40, 0, 0), BackgroundTransparency = 1 }, 0.2)
+		Tween(shadow, { Transparency = 1 }, 0.2)
+		task.delay(0.2, function()
+			if card then card:Destroy() end
+		end)
+	end
+	closeBtn.MouseButton1Click:Connect(Dismiss)
+
+	-- Slide + fade + shadow fade-in
 	card.BackgroundTransparency = 1
 	card.Position = UDim2.new(1, 40, 0, 0)
-	Tween(card, { BackgroundTransparency = 0, Position = UDim2.new(0, 0, 0, 0) }, 0.25)
+	Tween(card, { Position = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 0 }, 0.25, Enum.EasingStyle.Back)
+	Tween(shadow, { Transparency = 0.55 }, 0.3)
 
 	if config.Duration then
-		task.delay(config.Duration, function()
-			if card and card.Parent then
-				Tween(card, { Position = UDim2.new(1, 40, 0, 0) }, 0.2)
-				task.wait(0.2)
-				card:Destroy()
-			end
-		end)
+		if progressFill then
+			Tween(progressFill, { Size = UDim2.new(0, 0, 1, 0) }, config.Duration, Enum.EasingStyle.Linear)
+		end
+		task.delay(config.Duration, Dismiss)
 	end
 
 	return card
@@ -359,17 +522,93 @@ function NovaUI:CreateWindow(config)
 		Parent = ScreenParent(),
 	})
 
+	-- Tooltip helper (needs ScreenGui + theme, so it's scoped per-window).
+	local function AttachTooltip(button, text)
+		local tooltip = New("TextLabel", {
+			Text = text,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			TextColor3 = theme.Text,
+			BackgroundColor3 = theme.ElementBackgroundHover,
+			BackgroundTransparency = 1,
+			Visible = false,
+			ZIndex = 100,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.new(0, 0, 0, 24),
+			Parent = ScreenGui,
+		})
+		Round(tooltip, 5)
+		Pad(tooltip, 8, 0, 8, 0)
+		button.MouseEnter:Connect(function()
+			tooltip.Position = UDim2.fromOffset(button.AbsolutePosition.X + button.AbsoluteSize.X + 8, button.AbsolutePosition.Y + button.AbsoluteSize.Y / 2 - 12)
+			tooltip.Visible = true
+			tooltip.BackgroundTransparency = 1
+			Tween(tooltip, { BackgroundTransparency = 0 }, 0.1)
+		end)
+		button.MouseLeave:Connect(function()
+			tooltip.Visible = false
+		end)
+		return tooltip
+	end
+
+	-- Small reusable icon-button constructor (Lucide icon w/ text fallback,
+	-- hover tint, hover-scale pop). Used for chrome + sidebar buttons.
+	local function MakeIconButton(parent, sizePx, iconName, fallbackText, iconSize)
+		local btn = New("TextButton", {
+			Text = "",
+			BackgroundColor3 = theme.ElementBackground,
+			BackgroundTransparency = 1,
+			Size = UDim2.new(0, sizePx, 0, sizePx),
+			AutoButtonColor = false,
+			Parent = parent,
+		})
+		Round(btn, math.floor(sizePx / 2) - 3)
+		local state = { handle = SetButtonIcon(btn, iconName, fallbackText, iconSize or 14, theme.SubText) }
+		AddHoverScale(btn, 1.1)
+		btn.MouseEnter:Connect(function()
+			Tween(btn, { BackgroundTransparency = 0.85 }, 0.12)
+			state.handle.SetColor(theme.Text)
+		end)
+		btn.MouseLeave:Connect(function()
+			Tween(btn, { BackgroundTransparency = 1 }, 0.12)
+			state.handle.SetColor(theme.SubText)
+		end)
+		return {
+			Instance = btn,
+			SetIcon = function(name, fb)
+				state.handle = SetButtonIcon(btn, name, fb, iconSize or 14, theme.SubText)
+			end,
+			SetColor = function(c)
+				state.handle.SetColor(c)
+			end,
+		}
+	end
+
+	-- Main is the frame that gets positioned/dragged/resized directly.
+	-- UIShadow is a UI modifier (like UICorner/UIStroke, both also attached
+	-- directly below) — it isn't clipped by Main's own ClipsDescendants and
+	-- doesn't need a separate un-clipped wrapper frame.
 	local Main = New("Frame", {
 		Name = "Main",
 		BackgroundColor3 = theme.Background,
-		BackgroundTransparency = config.Acrylic and 0.06 or 0,
-		Position = UDim2.new(0.5, -size.X.Offset / 2, 0.5, -size.Y.Offset / 2),
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
 		Size = size,
 		ClipsDescendants = true,
 		Parent = ScreenGui,
 	})
 	Round(Main, 14)
 	Stroke(Main, theme.Border, 1)
+	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 30 })
+
+	-- Opening animation: pop + fade in
+	do
+		local targetAcrylicTransparency = config.Acrylic and 0.06 or 0
+		Main.Size = UDim2.new(size.X.Scale, size.X.Offset * 0.94, size.Y.Scale, size.Y.Offset * 0.94)
+		Tween(Main, { Size = size, BackgroundTransparency = targetAcrylicTransparency }, 0.28, Enum.EasingStyle.Back)
+		Tween(Shadow, { Transparency = 0.5 }, 0.3)
+	end
 
 	--=========================================================================
 	-- SIDEBAR (icon rail, full height)
@@ -426,6 +665,9 @@ function NovaUI:CreateWindow(config)
 		Parent = TabRailScroll,
 	})
 
+	-- Populated below, after Window:AddSidebarButton exists — either with
+	-- config.SidebarButtons (fully customizable Lucide icon buttons) or a
+	-- sensible default (collapse + profile).
 	local SidebarFooter = New("Frame", {
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(0.5, 1),
@@ -439,37 +681,6 @@ function NovaUI:CreateWindow(config)
 		Padding = UDim.new(0, 10),
 		Parent = SidebarFooter,
 	})
-
-	local ExpandBtn = New("TextButton", {
-		Text = "\226\140\132", -- chevron-ish fallback glyph
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		TextColor3 = theme.SubText,
-		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 24, 0, 24),
-		AutoButtonColor = false,
-		Parent = SidebarFooter,
-	})
-	do
-		local icon = GetIcon("chevron-down", 14, { TextColor3 = theme.SubText })
-		if icon then
-			ExpandBtn.Text = ""
-			icon.AnchorPoint = Vector2.new(0.5, 0.5)
-			icon.Position = UDim2.new(0.5, 0, 0.5, 0)
-			icon.ImageColor3 = theme.SubText
-			icon.Parent = ExpandBtn
-		end
-	end
-
-	local AvatarBtn = New("TextButton", {
-		Text = "",
-		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 32, 0, 32),
-		AutoButtonColor = false,
-		Parent = SidebarFooter,
-	})
-	Round(AvatarBtn, 16)
-	Stroke(AvatarBtn, theme.Border, 1)
 
 	--=========================================================================
 	-- CONTENT AREA (search/selector bar + tab pages)
@@ -636,10 +847,12 @@ function NovaUI:CreateWindow(config)
 	Pad(SelectorList, 4)
 	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorList })
 
-	-- Window chrome (minimize/close) — small, top-right corner
+	-- Window chrome (minimize/fullscreen/close) — small, top-right corner.
+	-- All three render as real Lucide icons via MakeIconButton, falling back
+	-- to text glyphs automatically if no icon provider is hooked up.
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 56, 1, 0),
+		Size = UDim2.new(0, 82, 1, 0),
 		LayoutOrder = 3,
 		Parent = TopBarRow,
 	})
@@ -651,29 +864,24 @@ function NovaUI:CreateWindow(config)
 		Padding = UDim.new(0, 4),
 		Parent = ChromeRow,
 	})
-	local MinimizeBtn = New("TextButton", {
-		Text = "\226\128\148",
-		Font = Enum.Font.GothamBold,
-		TextSize = 13,
-		TextColor3 = theme.SubText,
-		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 24, 0, 24),
-		LayoutOrder = 1,
-		Parent = ChromeRow,
-	})
-	local CloseBtn = New("TextButton", {
-		Text = "\226\156\149",
-		Font = Enum.Font.GothamBold,
-		TextSize = 13,
-		TextColor3 = theme.SubText,
-		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 24, 0, 24),
-		LayoutOrder = 2,
-		Parent = ChromeRow,
-	})
 
-	MakeDraggable(Main, LogoBox)
-	MakeDraggable(Main, ContentTopBar)
+	local MinimizeBtn = MakeIconButton(ChromeRow, 24, "minus", "\226\128\148", 13)
+	MinimizeBtn.Instance.LayoutOrder = 1
+	AttachTooltip(MinimizeBtn.Instance, "Minimize")
+
+	local FullscreenBtn = MakeIconButton(ChromeRow, 24, "maximize", "\226\150\162", 13)
+	FullscreenBtn.Instance.LayoutOrder = 2
+	AttachTooltip(FullscreenBtn.Instance, "Fullscreen")
+
+	local CloseBtn = MakeIconButton(ChromeRow, 24, "x", "\226\156\149", 13)
+	CloseBtn.Instance.LayoutOrder = 3
+	AttachTooltip(CloseBtn.Instance, "Close")
+	CloseBtn.Instance.MouseEnter:Connect(function()
+		CloseBtn.SetColor(Color3.fromRGB(255, 100, 100))
+	end)
+
+	MakeDraggable(WindowHolder, LogoBox)
+	MakeDraggable(WindowHolder, ContentTopBar)
 
 	local PagesContainer = New("Frame", {
 		Name = "Pages",
@@ -691,30 +899,52 @@ function NovaUI:CreateWindow(config)
 	Window._tabs = {}
 	Window._gui = ScreenGui
 	Window._main = Main
+	Window._holder = WindowHolder
 	Window._minimized = false
+	Window._fullscreen = false
 	Window._fullSize = size
 	Window._activeTabIndex = 1
 	Window._searchRows = {} -- { {Instance, TitleLower, TabIndex}, ... }
 	Window._searchText = ""
 
-	CloseBtn.MouseButton1Click:Connect(function()
+	CloseBtn.Instance.MouseButton1Click:Connect(function()
 		Window:Destroy()
 	end)
 
-	MinimizeBtn.MouseButton1Click:Connect(function()
+	MinimizeBtn.Instance.MouseButton1Click:Connect(function()
 		Window:ToggleMinimize()
+	end)
+
+	FullscreenBtn.Instance.MouseButton1Click:Connect(function()
+		Window:ToggleFullscreen()
 	end)
 
 	function Window:ToggleMinimize()
 		self._minimized = not self._minimized
 		if self._minimized then
-			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 56) }, 0.2)
+			Tween(WindowHolder, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 56) }, 0.2)
 			Sidebar.Visible = false
 			ContentArea.Visible = false
 		else
 			Sidebar.Visible = true
 			ContentArea.Visible = true
-			Tween(Main, { Size = self._fullSize }, 0.2)
+			Tween(WindowHolder, { Size = self._fullSize }, 0.2)
+		end
+	end
+
+	--- Toggles the window to fill (most of) the screen and back. Swaps the
+	--- chrome icon between "maximize" and "minimize-2" via Lucide.
+	function Window:ToggleFullscreen()
+		self._fullscreen = not self._fullscreen
+		if self._fullscreen then
+			self._savedHolderSize = WindowHolder.Size
+			local camera = Workspace.CurrentCamera
+			local viewport = (camera and camera.ViewportSize) or Vector2.new(1280, 720)
+			Tween(WindowHolder, { Size = UDim2.fromOffset(viewport.X - 32, viewport.Y - 32) }, 0.25, Enum.EasingStyle.Quint)
+			FullscreenBtn.SetIcon("minimize-2", "\226\150\163")
+		else
+			Tween(WindowHolder, { Size = self._savedHolderSize or self._fullSize }, 0.25, Enum.EasingStyle.Quint)
+			FullscreenBtn.SetIcon("maximize", "\226\150\162")
 		end
 	end
 
@@ -729,6 +959,41 @@ function NovaUI:CreateWindow(config)
 
 	function Window:Destroy()
 		ScreenGui:Destroy()
+	end
+
+	--- Window:AddSidebarButton({ Icon, FallbackText, Tooltip, Callback, Order })
+	--- Appends a fully customizable Lucide icon button to the bottom of the
+	--- sidebar rail. Pass `config.SidebarButtons` (an array of these same
+	--- tables) to CreateWindow to replace the default set entirely.
+	function Window:AddSidebarButton(cfg)
+		cfg = cfg or {}
+		local btnHandle = MakeIconButton(SidebarFooter, 32, cfg.Icon, cfg.FallbackText or "\226\128\162", 15)
+		btnHandle.Instance.LayoutOrder = cfg.Order or (#SidebarFooter:GetChildren())
+		if cfg.Tooltip then
+			AttachTooltip(btnHandle.Instance, cfg.Tooltip)
+		end
+		if cfg.Callback then
+			btnHandle.Instance.MouseButton1Click:Connect(cfg.Callback)
+		end
+		return btnHandle
+	end
+
+	if config.SidebarButtons then
+		for _, btnCfg in ipairs(config.SidebarButtons) do
+			Window:AddSidebarButton(btnCfg)
+		end
+	else
+		Window:AddSidebarButton({
+			Icon = "chevron-down",
+			FallbackText = "\226\140\132",
+			Tooltip = "Collapse",
+			Callback = function() Window:ToggleMinimize() end,
+		})
+		Window:AddSidebarButton({
+			Icon = "user",
+			FallbackText = "\226\128\162",
+			Tooltip = "Profile",
+		})
 	end
 
 	local function ApplySearchFilter()
@@ -785,7 +1050,9 @@ function NovaUI:CreateWindow(config)
 		end
 	end
 	SelectorPill.MouseButton1Click:Connect(function()
-		SelectorList.Visible = not SelectorList.Visible
+		local opening = not SelectorList.Visible
+		SelectorList.Visible = opening
+		if opening then PopIn(SelectorList) end
 	end)
 	Window.ConfigSelector = ConfigSelector
 	Window.Search = { Box = SearchBox }
@@ -793,15 +1060,23 @@ function NovaUI:CreateWindow(config)
 	function Window:SelectTab(index)
 		local tab = self._tabs[index]
 		if not tab then return end
+		local previousIndex = self._activeTabIndex
 		self._activeTabIndex = index
 		for i, t in ipairs(self._tabs) do
-			t._page.Visible = (i == index)
-			t._button.BackgroundTransparency = (i == index) and 0.85 or 1
+			local active = (i == index)
+			if active then
+				t._page.Visible = true
+				t._page.Position = UDim2.new(0, (i > previousIndex) and 14 or -14, 0, 0)
+				Tween(t._page, { Position = UDim2.new(0, 0, 0, 0) }, 0.18, Enum.EasingStyle.Quint)
+			elseif i ~= index then
+				t._page.Visible = false
+			end
+			Tween(t._button, { BackgroundTransparency = active and 0.85 or 1 }, 0.12)
 			if t._icon then
-				t._icon.ImageColor3 = (i == index) and theme.Accent or theme.SubText
+				Tween(t._icon, { ImageColor3 = active and theme.Accent or theme.SubText }, 0.12)
 			end
 			if t._fallbackLabel then
-				t._fallbackLabel.TextColor3 = (i == index) and theme.Accent or theme.SubText
+				t._fallbackLabel.TextColor3 = active and theme.Accent or theme.SubText
 			end
 		end
 		ApplySearchFilter()
@@ -934,31 +1209,16 @@ function NovaUI:CreateWindow(config)
 			})
 		end
 
-		-- Tooltip (parented to ScreenGui so it isn't clipped by Main)
-		local tooltip = New("TextLabel", {
-			Text = tabConfig.Title or ("Tab " .. index),
-			Font = Enum.Font.GothamMedium,
-			TextSize = 12,
-			TextColor3 = theme.Text,
-			BackgroundColor3 = theme.ElementBackgroundHover,
-			Visible = false,
-			ZIndex = 100,
-			AutomaticSize = Enum.AutomaticSize.X,
-			Size = UDim2.new(0, 0, 0, 24),
-			Parent = ScreenGui,
-		})
-		Round(tooltip, 5)
-		Pad(tooltip, 8, 0, 8, 0)
+		-- Tooltip + hover-scale pop (parented to ScreenGui so it isn't clipped by Main)
+		AttachTooltip(button, tabConfig.Title or ("Tab " .. index))
+		AddHoverScale(button, 1.1)
 
 		button.MouseEnter:Connect(function()
-			tooltip.Position = UDim2.fromOffset(button.AbsolutePosition.X + button.AbsoluteSize.X + 8, button.AbsolutePosition.Y + button.AbsoluteSize.Y / 2 - 12)
-			tooltip.Visible = true
 			if index ~= Window._activeTabIndex then
 				Tween(button, { BackgroundTransparency = 0.9 }, 0.12)
 			end
 		end)
 		button.MouseLeave:Connect(function()
-			tooltip.Visible = false
 			if index ~= Window._activeTabIndex then
 				Tween(button, { BackgroundTransparency = 1 }, 0.12)
 			end
@@ -1007,6 +1267,7 @@ function NovaUI:CreateWindow(config)
 				Parent = page,
 			})
 			Round(card, 8)
+			AppearAnimate(card)
 			return card
 		end
 
@@ -1412,7 +1673,9 @@ function NovaUI:CreateWindow(config)
 			end
 
 			selectedBtn.MouseButton1Click:Connect(function()
-				listFrame.Visible = not listFrame.Visible
+				local opening = not listFrame.Visible
+				listFrame.Visible = opening
+				if opening then PopIn(listFrame) end
 			end)
 
 			if cfg.Default ~= nil then
@@ -1594,7 +1857,9 @@ function NovaUI:CreateWindow(config)
 			end)
 
 			swatch.MouseButton1Click:Connect(function()
-				popup.Visible = not popup.Visible
+				local opening = not popup.Visible
+				popup.Visible = opening
+				if opening then PopIn(popup) end
 			end)
 
 			NovaUI.Options[id] = Colorpicker
@@ -1863,6 +2128,7 @@ function NovaUI:CreateWindow(config)
 				if elevated then
 					Round(row, 8)
 					Pad(row, 12, 0, 12, 0)
+					AppearAnimate(row, math.min(Section._rowCount * 0.02, 0.15))
 				end
 
 				table.insert(Window._searchRows, { Instance = row, TitleLower = (rowCfg.Title or ""):lower(), TabIndex = index })
@@ -2096,7 +2362,9 @@ function NovaUI:CreateWindow(config)
 					ddBtn.MouseButton1Click:Connect(function()
 						listFrame.Position = UDim2.new(1, 0, 1, 4)
 						listFrame.AnchorPoint = Vector2.new(1, 0)
-						listFrame.Visible = not listFrame.Visible
+						local opening = not listFrame.Visible
+						listFrame.Visible = opening
+						if opening then PopIn(listFrame) end
 					end)
 					if rowCfg.Default ~= nil then
 						Dropdown:SetValue(rowCfg.Default)
