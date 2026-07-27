@@ -104,14 +104,14 @@ local function Round(inst, radius)
 end
 
 local function Stroke(inst, color, thickness, transparency)
-	New("UIStroke", {
+	local stroke = New("UIStroke", {
 		Color = color,
 		Thickness = thickness or 1,
 		Transparency = transparency or 0,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 		Parent = inst,
 	})
-	return inst
+	return stroke
 end
 
 local function Pad(inst, l, t, r, b)
@@ -746,6 +746,42 @@ function NovaUI:CreateWindow(config)
 		Tween(Shadow, { Transparency = 0.5 }, 0.25)
 	end
 
+	-- Bottom-right resize grip. High ZIndex so it's always grabbable above
+	-- whatever's scrolled underneath it; the actual drag wiring happens
+	-- further below (it needs the Window table's minimized/fullscreen state).
+	local ResizeHandle = New("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -3, 1, -3),
+		Size = UDim2.new(0, 18, 0, 18),
+		ZIndex = 50,
+		Parent = Main,
+	})
+	do
+		local icon = GetIcon("arrow-down-right", 14)
+		if icon then
+			icon.AnchorPoint = Vector2.new(0.5, 0.5)
+			icon.Position = UDim2.new(0.5, 0, 0.5, 0)
+			icon.ImageColor3 = theme.SubText
+			icon.ZIndex = 50
+			icon.Parent = ResizeHandle
+		else
+			New("TextLabel", {
+				Text = "\226\134\152", -- "↘"
+				Font = Enum.Font.GothamBold,
+				TextSize = 13,
+				TextColor3 = theme.SubText,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 1, 0),
+				ZIndex = 50,
+				Parent = ResizeHandle,
+			})
+		end
+	end
+	AddHoverScale(ResizeHandle, 1.2)
+
 	--=========================================================================
 	-- OVERLAY (dropdown lists / colorpickers / config selector render here,
 	-- as a ScreenGui-level sibling of Main, so they're always on top and
@@ -1112,13 +1148,29 @@ function NovaUI:CreateWindow(config)
 	end)
 	AttachTooltip(SaveConfigBtn, "Save Config")
 
-	-- Window chrome (minimize/fullscreen/close) — small, top-right corner.
+	-- Flexible spacer — eats whatever room is left in the top bar so
+	-- ChromeRow below always ends up flush against the right edge instead
+	-- of just trailing whatever's to its left. It's also a second drag
+	-- handle (besides the sidebar logo): a plain background area with
+	-- nothing interactive on it, so dragging from anywhere in that gap
+	-- doesn't fight any button/textbox clicks, while giving a much bigger
+	-- grab area than the small logo alone.
+	local TopBarSpacer = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 0, 1, 0),
+		LayoutOrder = 4,
+		Parent = TopBarRow,
+	})
+	New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = TopBarSpacer })
+
+	-- Window chrome (minimize/fullscreen/close) — small, flush to the right
+	-- edge of the top bar (TopBarSpacer above pushes it there).
 	-- All three render as real icons via MakeIconButton, falling back
 	-- to text glyphs automatically if no icon provider is hooked up.
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, 82, 1, 0),
-		LayoutOrder = 4,
+		LayoutOrder = 5,
 		ZIndex = 2,
 		Parent = TopBarRow,
 	})
@@ -1147,6 +1199,7 @@ function NovaUI:CreateWindow(config)
 	end)
 
 	MakeDraggable(Main, LogoBox)
+	MakeDraggable(Main, TopBarSpacer)
 
 	local PagesContainer = New("Frame", {
 		Name = "Pages",
@@ -1195,16 +1248,22 @@ function NovaUI:CreateWindow(config)
 			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, topBarHeight) }, 0.18, EASE_SOFT)
 			Sidebar.Visible = false
 			PagesContainer.Visible = false
+			ResizeHandle.Visible = false
 			Tween(ContentArea, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 1, 0) }, 0.18, EASE_SOFT)
 		else
 			Sidebar.Visible = true
 			PagesContainer.Visible = true
+			ResizeHandle.Visible = true
 			Tween(ContentArea, { Position = UDim2.new(0, railWidth, 0, 0), Size = UDim2.new(1, -railWidth, 1, 0) }, 0.18, EASE_SOFT)
 			Tween(Main, { Size = self._preMinimizeSize or self._fullSize }, 0.18, EASE_SOFT)
 		end
 	end
 
 	-- Applies the current camera viewport to Main while fullscreen is on.
+	-- Also re-centers Main every time (Position keeps its dragged offset
+	-- otherwise, from AnchorPoint(0.5,0.5) + that offset — so if you'd
+	-- dragged the window off-center before going fullscreen, it would grow
+	-- around that off-center point instead of actually covering the screen).
 	-- `animate` tweens the very first application; live updates afterward
 	-- (screen/resolution changes while already fullscreen) snap instantly so
 	-- they can't fight an in-flight tween.
@@ -1212,10 +1271,12 @@ function NovaUI:CreateWindow(config)
 		local camera = Workspace.CurrentCamera
 		local viewport = (camera and camera.ViewportSize) or Vector2.new(1280, 720)
 		local targetSize = UDim2.fromOffset(viewport.X - 32, viewport.Y - 32)
+		local targetPosition = UDim2.new(0.5, 0, 0.5, 0)
 		if animate then
-			Tween(Main, { Size = targetSize }, 0.2, EASE_SOFT)
+			Tween(Main, { Size = targetSize, Position = targetPosition }, 0.2, EASE_SOFT)
 		else
 			Main.Size = targetSize
+			Main.Position = targetPosition
 		end
 	end
 
@@ -1238,6 +1299,8 @@ function NovaUI:CreateWindow(config)
 		self._fullscreen = not self._fullscreen
 		if self._fullscreen then
 			self._savedSize = Main.Size
+			self._savedPosition = Main.Position
+			ResizeHandle.Visible = false
 			ApplyViewportSize(self, true)
 
 			local function HookCamera(camera)
@@ -1259,9 +1322,49 @@ function NovaUI:CreateWindow(config)
 			FullscreenBtn.SetIcon("shrink", "\226\150\163")
 		else
 			DisconnectFullscreenTracking(self)
-			Tween(Main, { Size = self._savedSize or self._fullSize }, 0.2, EASE_SOFT)
+			ResizeHandle.Visible = not self._minimized
+			Tween(Main, {
+				Size = self._savedSize or self._fullSize,
+				Position = self._savedPosition or UDim2.new(0.5, 0, 0.5, 0),
+			}, 0.2, EASE_SOFT)
 			FullscreenBtn.SetIcon("expand", "\226\150\162")
 		end
+	end
+
+	-- Drag-to-resize from the bottom-right corner grip. Disabled while
+	-- minimized/fullscreen since Main's size is programmatically driven
+	-- then; resizing updates Window._fullSize so minimize/restore and
+	-- exiting fullscreen both snap back to whatever size you last set by
+	-- hand rather than the original CreateWindow size.
+	do
+		local MIN_WIDTH = math.max(360, railWidth + 220)
+		local MIN_HEIGHT = math.max(280, topBarHeight + 160)
+		local resizing = false
+		local resizeStart, startSize
+
+		ResizeHandle.InputBegan:Connect(function(input)
+			if Window._minimized or Window._fullscreen then return end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				resizing = true
+				resizeStart = input.Position
+				startSize = Main.Size
+			end
+		end)
+		UserInputService.InputChanged:Connect(function(input)
+			if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - resizeStart
+				local newWidth = math.max(MIN_WIDTH, startSize.X.Offset + delta.X)
+				local newHeight = math.max(MIN_HEIGHT, startSize.Y.Offset + delta.Y)
+				local newSize = UDim2.new(startSize.X.Scale, newWidth, startSize.Y.Scale, newHeight)
+				Main.Size = newSize
+				Window._fullSize = newSize
+			end
+		end)
+		UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				resizing = false
+			end
+		end)
 	end
 
 	if config.MinimizeKey then
@@ -1627,6 +1730,8 @@ function NovaUI:CreateWindow(config)
 			sectionCfg = sectionCfg or {}
 			local columnIndex = sectionCfg.Column or 1
 
+			local COLUMN_GAP = 24
+
 			if not Tab._columnsFrame then
 				Tab._columnsFrame = New("Frame", {
 					BackgroundTransparency = 1,
@@ -1634,36 +1739,53 @@ function NovaUI:CreateWindow(config)
 					AutomaticSize = Enum.AutomaticSize.Y,
 					Parent = page,
 				})
-				New("UIListLayout", {
-					SortOrder = Enum.SortOrder.LayoutOrder,
-					FillDirection = Enum.FillDirection.Horizontal,
-					Padding = UDim.new(0, 24),
-					Parent = Tab._columnsFrame,
-				})
 				Tab._columns = {}
+
+				-- Columns are positioned/sized with plain pixel math (derived
+				-- from the container's live AbsoluteSize), not UIListLayout +
+				-- UIFlexItem — Flex's per-item rounding can still land the
+				-- second column a pixel or two past the edge, especially once
+				-- the window itself is resizable/live-resized (fullscreen,
+				-- drag-to-resize). left + gap + right is forced to add up to
+				-- exactly the container width every time instead.
+				local function RelayoutColumns()
+					local totalWidth = Tab._columnsFrame.AbsoluteSize.X
+					if totalWidth <= 0 then return end
+					local col1, col2 = Tab._columns[1], Tab._columns[2]
+					if col1 and col2 then
+						local leftWidth = math.floor((totalWidth - COLUMN_GAP) / 2)
+						local rightWidth = totalWidth - COLUMN_GAP - leftWidth
+						col1.Position = UDim2.new(0, 0, 0, 0)
+						col1.Size = UDim2.new(0, leftWidth, 0, 0)
+						col2.Position = UDim2.new(0, leftWidth + COLUMN_GAP, 0, 0)
+						col2.Size = UDim2.new(0, rightWidth, 0, 0)
+					elseif col1 then
+						col1.Position = UDim2.new(0, 0, 0, 0)
+						col1.Size = UDim2.new(0, totalWidth, 0, 0)
+					elseif col2 then
+						col2.Position = UDim2.new(0, 0, 0, 0)
+						col2.Size = UDim2.new(0, totalWidth, 0, 0)
+					end
+				end
+				Tab._relayoutColumns = RelayoutColumns
+				Tab._columnsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(RelayoutColumns)
 			end
 
 			if not Tab._columns[columnIndex] then
 				local col = New("Frame", {
 					BackgroundTransparency = 1,
-					-- Width is handled by UIFlexItem below (Fill), not a
-					-- manual "0.5 scale minus half the gap" calculation —
-					-- that arithmetic rounds slightly differently per
-					-- column at certain widths, which is what pushed the
-					-- second column a few pixels past the edge. Flex lets
-					-- Roblox compute the exact split itself.
 					Size = UDim2.new(0, 0, 0, 0),
 					AutomaticSize = Enum.AutomaticSize.Y,
 					LayoutOrder = columnIndex,
 					Parent = Tab._columnsFrame,
 				})
-				New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = col })
 				New("UIListLayout", {
 					SortOrder = Enum.SortOrder.LayoutOrder,
 					Padding = UDim.new(0, 18),
 					Parent = col,
 				})
 				Tab._columns[columnIndex] = col
+				Tab._relayoutColumns()
 			end
 
 			local column = Tab._columns[columnIndex]
@@ -1973,22 +2095,25 @@ function NovaUI:CreateWindow(config)
 				ddBtn.TextXAlignment = Enum.TextXAlignment.Left
 				ddBtn.TextTruncate = Enum.TextTruncate.AtEnd
 
+				-- Kept as a variable so it can be flipped 180° open/closed.
+				local chevron
 				do
 					local icon = GetIcon("chevron-down", 10)
 					if icon then
+						chevron = icon
 						icon.AnchorPoint = Vector2.new(1, 0.5)
-						icon.Position = UDim2.new(1, -6, 0.5, 0)
+						icon.Position = UDim2.new(1, -8, 0.5, 0)
 						icon.ImageColor3 = theme.SubText
 						icon.Parent = ddBtn
 					else
-						New("TextLabel", {
+						chevron = New("TextLabel", {
 							Text = "\226\150\190",
 							Font = Enum.Font.Gotham,
 							TextSize = 9,
 							TextColor3 = theme.SubText,
 							BackgroundTransparency = 1,
 							AnchorPoint = Vector2.new(1, 0.5),
-							Position = UDim2.new(1, -6, 0.5, 0),
+							Position = UDim2.new(1, -8, 0.5, 0),
 							Size = UDim2.new(0, 10, 1, 0),
 							Parent = ddBtn,
 						})
@@ -2097,7 +2222,18 @@ function NovaUI:CreateWindow(config)
 					end)
 				end
 				ddBtn.MouseButton1Click:Connect(function()
-					OpenPopup(listFrame, ddBtn, { Align = "right" })
+					OpenPopup(listFrame, ddBtn, {
+						Align = "right",
+						OnClose = function()
+							Tween(chevron, { Rotation = 0 }, 0.12)
+						end,
+					})
+					-- OpenPopup toggles closed (and Visible=false) if this
+					-- dropdown was already open; only flip to 180° when it
+					-- actually just opened.
+					if listFrame.Visible then
+						Tween(chevron, { Rotation = 180 }, 0.12)
+					end
 				end)
 				if cfg.Default ~= nil then
 					Dropdown:SetValue(cfg.Default)
@@ -2170,6 +2306,15 @@ function NovaUI:CreateWindow(config)
 					Parent = previewRow,
 				})
 
+				-- SV box is 3 stacked layers, NOT a gradient applied to the base
+				-- frame itself: a UIGradient's Color sequence completely
+				-- overrides whatever the frame's own BackgroundColor3 is
+				-- wherever the gradient is opaque, so putting a white gradient
+				-- directly on svBox would hide the hue color underneath it
+				-- (that mismatch between the logical s/v mapping and what
+				-- actually rendered was the "left=hue, right=black" bug).
+				-- Base: solid, full-saturation/value hue — always visible
+				-- wherever both overlays above are transparent.
 				local svBox = New("Frame", {
 					BackgroundColor3 = Color3.fromRGB(255, 0, 0),
 					Size = UDim2.new(1, 0, 0, 100),
@@ -2177,9 +2322,25 @@ function NovaUI:CreateWindow(config)
 					Parent = popup,
 				})
 				Round(svBox, 4)
-				New("UIGradient", { Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(1, 1, 1)), Transparency = NumberSequence.new(0, 1), Parent = svBox })
-				local blackOverlay = New("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = svBox })
-				New("UIGradient", { Color = ColorSequence.new(Color3.new(0, 0, 0), Color3.new(0, 0, 0)), Transparency = NumberSequence.new(1, 0), Rotation = 90, Parent = blackOverlay })
+				-- White overlay: opaque white at the left edge (s=0), fading to
+				-- fully transparent at the right edge (s=1) where the hue below
+				-- shows through unobstructed.
+				local whiteOverlay = New("Frame", {
+					BackgroundColor3 = Color3.new(1, 1, 1),
+					BackgroundTransparency = 0,
+					Size = UDim2.new(1, 0, 1, 0),
+					Parent = svBox,
+				})
+				New("UIGradient", { Transparency = NumberSequence.new(0, 1), Parent = whiteOverlay })
+				-- Black overlay: fully transparent at the top edge (v=1, bright)
+				-- fading to opaque black at the bottom edge (v=0, dark).
+				local blackOverlay = New("Frame", {
+					BackgroundColor3 = Color3.new(0, 0, 0),
+					BackgroundTransparency = 0,
+					Size = UDim2.new(1, 0, 1, 0),
+					Parent = svBox,
+				})
+				New("UIGradient", { Transparency = NumberSequence.new(1, 0), Rotation = 90, Parent = blackOverlay })
 
 				local svCursor = New("Frame", {
 					BackgroundColor3 = Color3.new(1, 1, 1),
@@ -2451,6 +2612,10 @@ function NovaUI:CreateWindow(config)
 				})
 				Round(box, 6)
 				Pad(box, 8, 0, 8, 0)
+				-- Starts invisible; brightens into an accent-colored focus
+				-- ring and fades back out, so typing/clicking the field gives
+				-- the same kind of feedback every other control has.
+				local boxFocusRing = Stroke(box, theme.Accent, 1.5, 1)
 
 				local textbox = New("TextBox", {
 					Text = cfg.Default or "",
@@ -2465,6 +2630,25 @@ function NovaUI:CreateWindow(config)
 					Size = UDim2.new(1, 0, 1, 0),
 					Parent = box,
 				})
+
+				box.MouseEnter:Connect(function()
+					if not textbox:IsFocused() then
+						Tween(box, { BackgroundColor3 = theme.ElementBackground }, 0.1)
+					end
+				end)
+				box.MouseLeave:Connect(function()
+					if not textbox:IsFocused() then
+						Tween(box, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+					end
+				end)
+				textbox.Focused:Connect(function()
+					Tween(boxFocusRing, { Transparency = 0 }, 0.12)
+					Tween(box, { BackgroundColor3 = theme.ElementBackground }, 0.12)
+				end)
+				textbox.FocusLost:Connect(function()
+					Tween(boxFocusRing, { Transparency = 1 }, 0.15)
+					Tween(box, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.15)
+				end)
 
 				local Input = { Value = cfg.Default or "", Changed = Signal.new() }
 				function Input:OnChanged(fn) Input.Changed:Connect(fn) end
