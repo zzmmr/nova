@@ -82,6 +82,10 @@ local Themes = {
 		Divider = Color3.fromRGB(36, 36, 43),
 	},
 }
+-- Sidebar background: a matte near-black blended faintly toward Accent, so
+-- it reads as "dark with a hint of blue" rather than plain flat gray/black,
+-- without needing a hardcoded color that'd look wrong if Accent is changed.
+Themes.Dark.SidebarBackground = Themes.Dark.Background:Lerp(Themes.Dark.Accent, 0.12)
 
 -- Declared here (before the utilities below that reference it, like
 -- AddShadow checking NovaUI.ReducedEffects) — populated with the rest of
@@ -960,7 +964,7 @@ function NovaUI:CreateWindow(config)
 
 	local Sidebar = New("Frame", {
 		Name = "Sidebar",
-		BackgroundColor3 = theme.SecondaryBackground,
+		BackgroundColor3 = theme.SidebarBackground or theme.SecondaryBackground,
 		Size = UDim2.new(0, railWidth, 1, 0),
 		Parent = Main,
 	})
@@ -981,15 +985,25 @@ function NovaUI:CreateWindow(config)
 		Parent = LogoBox,
 	})
 	Round(logoMark, 9)
-	New("TextLabel", {
-		Text = (config.Title or "N"):sub(1, 1):upper(),
-		Font = Enum.Font.GothamBold,
-		TextSize = 15,
-		TextColor3 = Color3.new(1, 1, 1),
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 1, 0),
-		Parent = logoMark,
-	})
+	-- config.Logo swaps the default "first letter of the title" mark for a
+	-- real image — an icon name from the icon table, a raw asset id, or an
+	-- rbxassetid://... string all work (same as any other icon input).
+	local logoIcon = config.Logo and GetIcon(config.Logo, 20)
+	if logoIcon then
+		logoIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+		logoIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
+		logoIcon.Parent = logoMark
+	else
+		New("TextLabel", {
+			Text = (config.Title or "N"):sub(1, 1):upper(),
+			Font = Enum.Font.GothamBold,
+			TextSize = 15,
+			TextColor3 = Color3.new(1, 1, 1),
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 1, 0),
+			Parent = logoMark,
+		})
+	end
 
 	local TabRailScroll = New("ScrollingFrame", {
 		Name = "TabRail",
@@ -2397,9 +2411,6 @@ function NovaUI:CreateWindow(config)
 
 				local ddBtn = New("TextButton", {
 					Text = "",
-					Font = Enum.Font.Gotham,
-					TextSize = 12,
-					TextColor3 = theme.SubText,
 					BackgroundColor3 = theme.ElementBackgroundHover,
 					BackgroundTransparency = 0,
 					AutoButtonColor = false,
@@ -2408,9 +2419,25 @@ function NovaUI:CreateWindow(config)
 					Parent = controlHolder,
 				})
 				Round(ddBtn, 6)
-				Pad(ddBtn, 8, 0, 22, 0)
-				ddBtn.TextXAlignment = Enum.TextXAlignment.Left
-				ddBtn.TextTruncate = Enum.TextTruncate.AtEnd
+				-- Deliberately no UIPadding on ddBtn itself — the chevron
+				-- below is positioned as a raw offset from ddBtn's own true
+				-- right edge, and UIPadding would shrink that reference box
+				-- too, landing the chevron well short of the edge instead of
+				-- flush against it. The value text gets its own label
+				-- instead of ddBtn's built-in Text, sized to leave room for
+				-- the chevron on the right.
+				local ddLabel = New("TextLabel", {
+					Text = "",
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextTruncate = Enum.TextTruncate.AtEnd,
+					BackgroundTransparency = 1,
+					Position = UDim2.new(0, 8, 0, 0),
+					Size = UDim2.new(1, -30, 1, 0),
+					Parent = ddBtn,
+				})
 
 				-- Kept as a variable so it can be flipped 180° open/closed.
 				local chevron
@@ -2474,7 +2501,7 @@ function NovaUI:CreateWindow(config)
 						return tostring(Dropdown.Value or "...")
 					end
 				end
-				local function RefreshButton() ddBtn.Text = LabelForValue() end
+				local function RefreshButton() ddLabel.Text = LabelForValue() end
 				local function RefreshHighlights()
 					for name, btn in pairs(Dropdown._optionButtons) do
 						local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
