@@ -1652,13 +1652,26 @@ function NovaUI:CreateWindow(config)
 				TextSize = 13,
 				TextColor3 = theme.Text,
 				BackgroundColor3 = theme.ElementBackground,
+				AutoButtonColor = false,
 				Size = UDim2.new(0, 90, 1, 0),
 				ZIndex = 51,
 				Parent = btnRow,
 			})
 			Round(btn, 6)
+			AddHoverScale(btn, 1.05)
+			btn.MouseEnter:Connect(function()
+				Tween(btn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+			end)
+			btn.MouseLeave:Connect(function()
+				Tween(btn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
+			end)
 			btn.MouseButton1Click:Connect(function()
-				overlay:Destroy()
+				Tween(overlay, { BackgroundTransparency = 1 }, 0.12)
+				Tween(boxScale, { Scale = 0.96 }, 0.12)
+				Tween(box, { BackgroundTransparency = 1 }, 0.1)
+				task.delay(0.12, function()
+					overlay:Destroy()
+				end)
 				if btnCfg.Callback then btnCfg.Callback() end
 			end)
 		end
@@ -1727,7 +1740,13 @@ function NovaUI:CreateWindow(config)
 			Visible = tabIndex == 1,
 			Parent = PagesContainer,
 		})
-		Pad(page, 20, 4, 20, 20)
+		-- Deliberately no UIPadding on `page` itself: the two-column split
+		-- below needs pixel-exact control over the padded content width, and
+		-- mixing that with however UIPadding remaps Scale for its children
+		-- was the suspected source of column 2 still overflowing a little
+		-- even after the math was exact — padding is applied by hand instead,
+		-- computed straight from page.AbsoluteSize with no ambiguity.
+		local PAGE_PAD_LEFT, PAGE_PAD_TOP, PAGE_PAD_RIGHT, PAGE_PAD_BOTTOM = 20, 4, 20, 20
 
 		local Tab = { _page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel, _columns = nil, _columnsFrame = nil }
 
@@ -1758,30 +1777,37 @@ function NovaUI:CreateWindow(config)
 			local COLUMN_GAP = 24
 
 			if not Tab._columnsFrame then
+				-- Pure offset Position/Size, computed directly from page's
+				-- raw (unpadded) AbsoluteSize — no Scale, no UIPadding
+				-- involved at all for this frame, so there's no ambiguity
+				-- left to cause column 2 to overflow. RIGHT_SAFETY reserves
+				-- a small extra gutter on top of PAGE_PAD_RIGHT so column 2
+				-- never sits flush against page's true right edge (where its
+				-- scrollbar rides).
+				local RIGHT_SAFETY = 6
 				Tab._columnsFrame = New("Frame", {
 					BackgroundTransparency = 1,
-					Size = UDim2.new(1, 0, 0, 0),
+					Position = UDim2.new(0, PAGE_PAD_LEFT, 0, PAGE_PAD_TOP),
+					Size = UDim2.new(0, 0, 0, 0),
 					AutomaticSize = Enum.AutomaticSize.Y,
 					Parent = page,
 				})
 				Tab._columns = {}
 
-				-- Columns are positioned/sized with plain pixel math (derived
-				-- from the container's live AbsoluteSize), not UIListLayout +
-				-- UIFlexItem — Flex's per-item rounding can still land the
-				-- second column a pixel or two past the edge, especially once
-				-- the window itself is resizable/live-resized (fullscreen,
-				-- drag-to-resize). left + gap + right adds up to slightly
-				-- LESS than the full container width on purpose (RIGHT_SAFETY
-				-- below) — a small reserved gutter so column 2's content
-				-- never sits flush against the ScrollingFrame's true edge
-				-- (where its scrollbar rides), instead of trying to land the
-				-- split at an exact-to-the-pixel width that any rounding or
-				-- scrollbar-thickness quirk could still push past.
-				local RIGHT_SAFETY = 6
+				local bottomSpacer = New("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(0, 1, 0, PAGE_PAD_BOTTOM),
+					Parent = page,
+				})
+				local function RepositionBottomSpacer()
+					bottomSpacer.Position = UDim2.new(0, 0, 0, PAGE_PAD_TOP + Tab._columnsFrame.AbsoluteSize.Y)
+				end
+				Tab._columnsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(RepositionBottomSpacer)
+
 				local function RelayoutColumns()
-					local totalWidth = Tab._columnsFrame.AbsoluteSize.X - RIGHT_SAFETY
+					local totalWidth = page.AbsoluteSize.X - PAGE_PAD_LEFT - PAGE_PAD_RIGHT - RIGHT_SAFETY
 					if totalWidth <= 0 then return end
+					Tab._columnsFrame.Size = UDim2.new(0, totalWidth, 0, 0)
 					local col1, col2 = Tab._columns[1], Tab._columns[2]
 					if col1 and col2 then
 						local leftWidth = math.floor((totalWidth - COLUMN_GAP) / 2)
@@ -1799,8 +1825,9 @@ function NovaUI:CreateWindow(config)
 					end
 				end
 				Tab._relayoutColumns = RelayoutColumns
-				Tab._columnsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(RelayoutColumns)
 				page:GetPropertyChangedSignal("AbsoluteSize"):Connect(RelayoutColumns)
+				RelayoutColumns()
+				RepositionBottomSpacer()
 			end
 
 			if not Tab._columns[columnIndex] then
