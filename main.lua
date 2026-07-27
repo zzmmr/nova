@@ -1238,6 +1238,31 @@ function NovaUI:CreateWindow(config)
 		Window:ToggleFullscreen()
 	end)
 
+	-- Resizes Main to `newSize` while keeping its current ON-SCREEN top-left
+	-- corner fixed, instead of its center (which is what plain AnchorPoint
+	-- (0.5,0.5) resizing does by default). Minimize only changes Height —
+	-- anchoring by center means restoring after you'd dragged the minimized
+	-- bar up near the top of the screen grows the window mostly upward,
+	-- pushing it (and its only drag handles) off the top of the screen
+	-- entirely. Anchoring by top-left instead means it only ever grows
+	-- downward/rightward from wherever it currently is, so it can't strand
+	-- itself off-screen like that.
+	local function ResizeKeepingTopLeft(newSize, duration, style)
+		local screenSize = ScreenGui.AbsoluteSize
+		local topLeft = Main.AbsolutePosition
+		local newWidth = newSize.X.Scale * screenSize.X + newSize.X.Offset
+		local newHeight = newSize.Y.Scale * screenSize.Y + newSize.Y.Offset
+		local newCenterX = topLeft.X + newWidth / 2
+		local newCenterY = topLeft.Y + newHeight / 2
+		local newPosition = UDim2.new(0.5, newCenterX - screenSize.X * 0.5, 0.5, newCenterY - screenSize.Y * 0.5)
+		if duration then
+			Tween(Main, { Size = newSize, Position = newPosition }, duration, style)
+		else
+			Main.Size = newSize
+			Main.Position = newPosition
+		end
+	end
+
 	--- Minimizing only collapses the sidebar + page content — the top bar
 	--- (search, config selector, save button, minimize/fullscreen/close) stays
 	--- visible and usable the whole time, it just fills the collapsed window.
@@ -1245,7 +1270,7 @@ function NovaUI:CreateWindow(config)
 		self._minimized = not self._minimized
 		if self._minimized then
 			self._preMinimizeSize = Main.Size
-			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, topBarHeight) }, 0.18, EASE_SOFT)
+			ResizeKeepingTopLeft(UDim2.new(0, self._fullSize.X.Offset, 0, topBarHeight), 0.18, EASE_SOFT)
 			Sidebar.Visible = false
 			PagesContainer.Visible = false
 			ResizeHandle.Visible = false
@@ -1255,7 +1280,7 @@ function NovaUI:CreateWindow(config)
 			PagesContainer.Visible = true
 			ResizeHandle.Visible = true
 			Tween(ContentArea, { Position = UDim2.new(0, railWidth, 0, 0), Size = UDim2.new(1, -railWidth, 1, 0) }, 0.18, EASE_SOFT)
-			Tween(Main, { Size = self._preMinimizeSize or self._fullSize }, 0.18, EASE_SOFT)
+			ResizeKeepingTopLeft(self._preMinimizeSize or self._fullSize, 0.18, EASE_SOFT)
 		end
 	end
 
@@ -1746,10 +1771,16 @@ function NovaUI:CreateWindow(config)
 				-- UIFlexItem — Flex's per-item rounding can still land the
 				-- second column a pixel or two past the edge, especially once
 				-- the window itself is resizable/live-resized (fullscreen,
-				-- drag-to-resize). left + gap + right is forced to add up to
-				-- exactly the container width every time instead.
+				-- drag-to-resize). left + gap + right adds up to slightly
+				-- LESS than the full container width on purpose (RIGHT_SAFETY
+				-- below) — a small reserved gutter so column 2's content
+				-- never sits flush against the ScrollingFrame's true edge
+				-- (where its scrollbar rides), instead of trying to land the
+				-- split at an exact-to-the-pixel width that any rounding or
+				-- scrollbar-thickness quirk could still push past.
+				local RIGHT_SAFETY = 6
 				local function RelayoutColumns()
-					local totalWidth = Tab._columnsFrame.AbsoluteSize.X
+					local totalWidth = Tab._columnsFrame.AbsoluteSize.X - RIGHT_SAFETY
 					if totalWidth <= 0 then return end
 					local col1, col2 = Tab._columns[1], Tab._columns[2]
 					if col1 and col2 then
@@ -1769,6 +1800,7 @@ function NovaUI:CreateWindow(config)
 				end
 				Tab._relayoutColumns = RelayoutColumns
 				Tab._columnsFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(RelayoutColumns)
+				page:GetPropertyChangedSignal("AbsoluteSize"):Connect(RelayoutColumns)
 			end
 
 			if not Tab._columns[columnIndex] then
