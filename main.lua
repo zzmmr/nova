@@ -1,40 +1,47 @@
 --[[
 	NovaUI
-	A lightweight, Fluent-inspired UI library for Roblox.
+	A lightweight, dashboard-style UI library for Roblox.
 
 	This is a standalone ModuleScript. Put it in ReplicatedStorage (or anywhere
 	a LocalScript can reach it) and `require()` it — see example.lua for usage.
 
-	Layout: icon-only sidebar rail + search/selector bar + two-column grouped
-	settings sections (rows with inline toggle/dropdown/slider controls),
-	styled after a dark dashboard-style settings panel.
+	Different from Fluent on purpose: there is no "add elements straight to a
+	tab" API. A Tab only ever holds Sections (Tab:AddSection), and every
+	element (toggle/slider/dropdown/colorpicker/keybind/input/button/
+	paragraph) is added to a Section as a row:
 
-	Icons: optional integration with latte-soft/lucide-roblox
-	(https://github.com/latte-soft/lucide-roblox). If a "Lucide" ModuleScript
-	is found under ReplicatedStorage (or passed via CreateWindow's
-	`IconProvider` option / NovaUI:SetIconProvider), tab icons and every
-	chrome icon (search, folder, chevron, minimize, fullscreen, close,
-	notification close) render as real Lucide glyphs. The bottom-of-sidebar
-	buttons are fully customizable Lucide icon buttons too — see
-	`config.SidebarButtons` / `Window:AddSidebarButton`. Without a provider,
-	everything still works — icons just fall back to plain text glyphs so
-	the library has no hard dependency.
+		local Section = Tab:AddSection({ Title = "Display", Column = 1 })
+		Section:AddToggle("MyToggle", { Title = "Enable overlay", Default = true })
+		Section:AddSlider("Scale", { Title = "Scale", Min = 50, Max = 200, Suffix = "%" })
 
-	Depth & motion: windows get a soft UIShadow (AddShadow utility, reusable
-	on your own frames) plus a pop-in open animation; tabs slide when
-	switched; dropdowns/popups/notifications pop and fade in; sidebar and
-	chrome buttons get a hover "scale pop"; cards/rows fade+rise in on
-	creation.
+	Icons: no external module dependency — give NovaUI a plain asset-id table
+	instead, via `NovaUI:SetIcons(table)` or CreateWindow's `Icons = table`
+	option (or drop a ModuleScript named "NovaIcons"/"Icons" under
+	ReplicatedStorage returning the same shape and it's found automatically):
 
-	Components:
-		Window (+ fullscreen/minimize/close, draggable, customizable sidebar
-		buttons), Tab, Section/Row (grouped settings list), Paragraph, Button,
-		Toggle, Slider, Dropdown (single/multi), Colorpicker (with optional
-		transparency), Keybind, Input, Notify (with shadow + auto-dismiss
-		progress bar), Dialog
+		{
+			["48px"]  = { rewind = {123456789, {48, 48}}, ... },
+			["256px"] = { rewind = {987654321, {256, 256}}, ... },
+		}
+
+	i.e. size-bucket key -> icon name -> {assetId, {pxWidth, pxHeight}}. Any
+	number of size buckets works; GetIcon picks the smallest bucket that's
+	still big enough for the requested render size and scales it down
+	(preserving aspect ratio), so keep at least one reasonably large bucket
+	per icon. Tab icons, chrome icons (search, folder, chevron, minimize,
+	fullscreen, close, notification close), and the bottom-of-sidebar
+	buttons (`config.SidebarButtons` / `Window:AddSidebarButton`) all pull
+	from this same table via the icon name string. Without a table set,
+	everything still works — icons just fall back to plain text glyphs.
+
+	Popups (dropdown lists, colorpickers, the top config selector) render in
+	a dedicated top-level overlay layer, so they're never occluded by other
+	rows/sections and close automatically on an outside click.
+
+	Motion is intentionally restrained/modern: short fades + small (4-8px)
+	slides, no overshoot/bounce easing.
 
 	Theme: dark background with a blue accent (see Themes.Dark below).
-	You can swap NovaUI.Theme for your own table with the same keys.
 --]]
 
 local TweenService = game:GetService("TweenService")
@@ -57,6 +64,7 @@ local Themes = {
 		SecondaryBackground = Color3.fromRGB(19, 19, 24),
 		ElementBackground = Color3.fromRGB(26, 26, 32),
 		ElementBackgroundHover = Color3.fromRGB(34, 34, 41),
+		PopupBackground = Color3.fromRGB(30, 30, 37),
 		Text = Color3.fromRGB(235, 236, 240),
 		SubText = Color3.fromRGB(140, 142, 155),
 		Border = Color3.fromRGB(40, 40, 48),
@@ -111,8 +119,12 @@ local function Pad(inst, l, t, r, b)
 	return inst
 end
 
+-- Modern, restrained easing everywhere: short duration, no overshoot/bounce.
+local EASE = Enum.EasingStyle.Quad
+local EASE_SOFT = Enum.EasingStyle.Quint
+
 local function Tween(inst, props, time, style, dir)
-	local info = TweenInfo.new(time or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out)
+	local info = TweenInfo.new(time or 0.15, style or EASE, dir or Enum.EasingDirection.Out)
 	local tw = TweenService:Create(inst, info, props)
 	tw:Play()
 	return tw
@@ -146,15 +158,12 @@ local function MakeDraggable(frame, handle)
 	end)
 end
 
--- Uses Roblox's native UIShadow instance (a UI modifier, like UICorner/
--- UIStroke — it doesn't participate in UIListLayout and isn't clipped by
--- its own parent's ClipsDescendants, so it can just be added directly to
--- whatever Frame should cast the shadow, no wrapper frame needed.
--- opts: Color, Transparency, OffsetX/OffsetY (pixels), Blur (pixels),
--- Spread (UDim2, grows the shadow beyond the parent's bounds), ZIndex.
+-- Roblox's native UIShadow instance (a UI modifier, like UICorner/UIStroke —
+-- it doesn't participate in UIListLayout and isn't clipped by its own
+-- parent's ClipsDescendants), so it can be added directly to any Frame.
 local function AddShadow(parent, opts)
 	opts = opts or {}
-	local shadow = New("UIShadow", {
+	return New("UIShadow", {
 		Color = opts.Color or Color3.new(0, 0, 0),
 		Transparency = opts.Transparency or 0.6,
 		Offset = UDim2.fromOffset(opts.OffsetX or 0, opts.OffsetY or 6),
@@ -164,48 +173,46 @@ local function AddShadow(parent, opts)
 		Enabled = opts.Enabled ~= false,
 		Parent = parent,
 	})
-	return shadow
 end
 
--- Adds a small "pop" scale animation on hover/press — used on icon buttons
--- throughout the sidebar/chrome for a snappier feel.
+-- Small, snappy hover feedback (no bounce) — used on icon buttons.
 local function AddHoverScale(button, scaleUp)
-	scaleUp = scaleUp or 1.06
+	scaleUp = scaleUp or 1.04
 	local uiScale = New("UIScale", { Scale = 1, Parent = button })
 	button.MouseEnter:Connect(function()
-		Tween(uiScale, { Scale = scaleUp }, 0.12, Enum.EasingStyle.Back)
+		Tween(uiScale, { Scale = scaleUp }, 0.1)
 	end)
 	button.MouseLeave:Connect(function()
-		Tween(uiScale, { Scale = 1 }, 0.12)
+		Tween(uiScale, { Scale = 1 }, 0.1)
 	end)
 	button.MouseButton1Down:Connect(function()
-		Tween(uiScale, { Scale = scaleUp * 0.92 }, 0.08)
+		Tween(uiScale, { Scale = scaleUp * 0.95 }, 0.06)
 	end)
 	button.MouseButton1Up:Connect(function()
-		Tween(uiScale, { Scale = scaleUp }, 0.08)
+		Tween(uiScale, { Scale = scaleUp }, 0.06)
 	end)
 	return uiScale
 end
 
--- Quick "pop in" grow animation for popups/dropdown lists when they open.
+-- Quick fade + tiny scale for popups/dropdown lists when they open. No bounce.
 local function PopIn(frame)
 	local scale = frame:FindFirstChildOfClass("UIScale")
 	if not scale then
 		scale = New("UIScale", { Scale = 1, Parent = frame })
 	end
-	scale.Scale = 0.88
-	Tween(scale, { Scale = 1 }, 0.15, Enum.EasingStyle.Back)
+	scale.Scale = 0.96
+	Tween(scale, { Scale = 1 }, 0.12, EASE)
 end
 
--- Subtle fade + rise-in animation for newly created cards/rows.
-local function AppearAnimate(inst, delayTime)
+-- Subtle fade + small rise-in for newly created rows/cards. No bounce.
+local function FadeSlideIn(inst, delayTime)
 	local originalPosition = inst.Position
 	local originalTransparency = inst.BackgroundTransparency
-	inst.Position = originalPosition + UDim2.new(0, 0, 0, 6)
+	inst.Position = originalPosition + UDim2.new(0, 0, 0, 4)
 	inst.BackgroundTransparency = 1
 	task.delay(delayTime or 0, function()
 		if inst and inst.Parent then
-			Tween(inst, { Position = originalPosition, BackgroundTransparency = originalTransparency }, 0.22, Enum.EasingStyle.Quint)
+			Tween(inst, { Position = originalPosition, BackgroundTransparency = originalTransparency }, 0.18, EASE_SOFT)
 		end
 	end)
 end
@@ -240,53 +247,94 @@ end
 --=============================================================================
 
 local NovaUI = {}
-NovaUI.Version = "1.1.0"
+NovaUI.Version = "2.0.0"
 NovaUI.Options = {}
 NovaUI.Unloaded = false
 NovaUI.Theme = Themes.Dark
-NovaUI.IconProvider = nil
+NovaUI.Icons = nil
 
---- Optional: NovaUI:SetIconProvider(require(path.to.Lucide))
--- Hooks up latte-soft/lucide-roblox (or any module exposing the same
--- `ImageLabel(name, size, propsOverrides)` API) so tab/chrome icons render
--- as real Lucide glyphs instead of falling back to text.
-function NovaUI:SetIconProvider(module)
-	NovaUI.IconProvider = module
+--- Provide your own icon asset table (no external module dependency).
+--- Shape: { ["48px"] = { iconname = {assetId, {pxWidth, pxHeight}}, ... },
+---          ["256px"] = { iconname = {assetId, {pxWidth, pxHeight}}, ... } }
+--- Any number of size buckets is fine — keys just need a number in them
+--- (e.g. "48px", "256", "64x64"). GetIcon picks the smallest bucket that's
+--- still >= the requested render size (falling back to the largest bucket
+--- available if none is big enough), then scales to fit while preserving
+--- each icon's native aspect ratio.
+function NovaUI:SetIcons(iconTable)
+	NovaUI.Icons = iconTable
 end
 
-local function TryFindLucide()
-	if NovaUI.IconProvider then
-		return NovaUI.IconProvider
+local function TryFindIcons()
+	if NovaUI.Icons then
+		return NovaUI.Icons
 	end
 	local ok, mod = pcall(function()
-		local found = ReplicatedStorage:FindFirstChild("Lucide") or ReplicatedStorage:FindFirstChild("lucide-roblox")
+		local found = ReplicatedStorage:FindFirstChild("NovaIcons") or ReplicatedStorage:FindFirstChild("Icons")
 		return found and require(found)
 	end)
 	if ok and mod then
-		NovaUI.IconProvider = mod
+		NovaUI.Icons = mod
 		return mod
 	end
 	return nil
 end
 
--- Returns an ImageLabel for `name` via the icon provider, or nil if
+local function PickIconSizeKey(sheet, targetSize)
+	local bestKey, bestNum -- smallest bucket that's still >= targetSize
+	local largestKey, largestNum -- fallback: largest bucket available
+	for key in pairs(sheet) do
+		local num = tonumber(tostring(key):match("%d+"))
+		if num then
+			if num >= targetSize and (not bestNum or num < bestNum) then
+				bestNum, bestKey = num, key
+			end
+			if not largestNum or num > largestNum then
+				largestNum, largestKey = num, key
+			end
+		end
+	end
+	return bestKey or largestKey
+end
+
+-- Returns an ImageLabel for `name` from the icon table, or nil if
 -- unavailable/not found — callers should always have a text fallback.
 local function GetIcon(name, size, propsOverrides)
 	if not name or name == "" then return nil end
-	local provider = TryFindLucide()
-	if not provider then return nil end
-	local ok, imageLabel = pcall(function()
-		return provider.ImageLabel(name, size or 20, propsOverrides)
+	local sheet = TryFindIcons()
+	if not sheet then return nil end
+
+	local sizeKey = PickIconSizeKey(sheet, size or 20)
+	local bucket = sizeKey and sheet[sizeKey]
+	local entry = bucket and bucket[name]
+	if not entry then return nil end
+
+	local assetId, dims = entry[1], entry[2]
+	if not assetId then return nil end
+	local nativeW = (dims and dims[1]) or size or 20
+	local nativeH = (dims and dims[2]) or size or 20
+	local target = size or math.max(nativeW, nativeH)
+	local scale = target / math.max(nativeW, nativeH)
+
+	local ok, label = pcall(function()
+		return New("ImageLabel", {
+			Image = "rbxassetid://" .. tostring(assetId),
+			BackgroundTransparency = 1,
+			Size = UDim2.fromOffset(math.floor(nativeW * scale + 0.5), math.floor(nativeH * scale + 0.5)),
+		})
 	end)
-	if ok and imageLabel then return imageLabel end
-	return nil
+	if not ok or not label then return nil end
+
+	if propsOverrides then
+		for prop, value in pairs(propsOverrides) do
+			label[prop] = value
+		end
+	end
+	return label
 end
 
--- Sets a button's visible content to a Lucide icon when available, falling
--- back to a text glyph otherwise. Used for close/minimize/fullscreen/search/
--- chevron buttons and any customizable icon button (e.g. sidebar buttons).
--- Returns a handle with :SetColor(color) so callers can recolor on hover
--- without caring whether it rendered as an image or as text.
+-- Sets a button's visible content to an icon (from the icon table) when
+-- back to a text glyph otherwise. Returns a handle with :SetColor(color).
 local function SetButtonIcon(button, iconName, fallbackText, size, color)
 	local existing = button:FindFirstChild("__Icon")
 	if existing then existing:Destroy() end
@@ -356,9 +404,11 @@ function NovaUI:Notify(config)
 	local theme = NovaUI.Theme
 	local holder = EnsureNotifHolder()
 
-	-- `card` is the actual list item. UIShadow is a UI modifier (like
-	-- UICorner/UIStroke) so it can sit directly on `card` without being
-	-- swept into `content`'s UIListLayout or clipped by ClipsDescendants.
+	-- IMPORTANT: `card` uses AutomaticSize.Y. Never give a direct child of
+	-- an AutomaticSize.Y frame a Scale-based Y size (e.g. UDim2.new(0,3,1,0))
+	-- — that's a circular size dependency and is what made notifications
+	-- balloon to a huge height before. The accent strip's height is instead
+	-- driven explicitly from `content`'s resolved AbsoluteSize below.
 	local card = New("Frame", {
 		BackgroundColor3 = theme.SecondaryBackground,
 		Size = UDim2.new(1, 0, 0, 0),
@@ -371,40 +421,39 @@ function NovaUI:Notify(config)
 	Stroke(card, theme.Border, 1)
 	local shadow = AddShadow(card, { Transparency = 1, OffsetY = 6, Blur = 18 })
 
-	-- Left accent strip — a plain absolutely-positioned sibling of `content`,
-	-- so it isn't pulled into the vertical list flow below.
-	New("Frame", {
-		BackgroundColor3 = theme.Accent,
-		Size = UDim2.new(0, 3, 1, 0),
-		Parent = card,
-	})
-
-	local closeBtn = New("TextButton", {
-		Text = "",
-		BackgroundTransparency = 1,
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -10, 0, 10),
-		Size = UDim2.new(0, 18, 0, 18),
-		AutoButtonColor = false,
-		ZIndex = 2,
-		Parent = card,
-	})
-	SetButtonIcon(closeBtn, "x", "\226\156\149", 11, theme.SubText)
-
-	-- All the actual title/body text lives in here, where the UIListLayout
-	-- only ever sees text labels — not the accent strip or close button.
 	local content = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = card,
 	})
-	Pad(content, 12, 12, 12, 14)
+	Pad(content, 14, 12, 12, 14)
 	New("UIListLayout", {
 		SortOrder = Enum.SortOrder.LayoutOrder,
 		Padding = UDim.new(0, 2),
 		Parent = content,
 	})
+
+	local accentBar = New("Frame", {
+		BackgroundColor3 = theme.Accent,
+		Size = UDim2.new(0, 3, 0, 0),
+		Parent = card,
+	})
+	content:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		accentBar.Size = UDim2.new(0, 3, 0, content.AbsoluteSize.Y)
+	end)
+
+	local closeBtn = New("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -8, 0, 8),
+		Size = UDim2.new(0, 18, 0, 18),
+		AutoButtonColor = false,
+		ZIndex = 2,
+		Parent = card,
+	})
+	SetButtonIcon(closeBtn, "x", "\226\156\149", 11, theme.SubText)
 
 	New("TextLabel", {
 		Text = config.Title or "Notification",
@@ -455,8 +504,7 @@ function NovaUI:Notify(config)
 	if config.Duration then
 		local progressTrack = New("Frame", {
 			BackgroundColor3 = theme.ElementBackgroundHover,
-			Position = UDim2.new(0, -12, 1, 2),
-			Size = UDim2.new(1, 24, 0, 3),
+			Size = UDim2.new(1, 0, 0, 3),
 			LayoutOrder = 99,
 			Parent = content,
 		})
@@ -471,19 +519,18 @@ function NovaUI:Notify(config)
 
 	local function Dismiss()
 		if not (card and card.Parent) then return end
-		Tween(card, { Position = UDim2.new(1, 40, 0, 0), BackgroundTransparency = 1 }, 0.2)
-		Tween(shadow, { Transparency = 1 }, 0.2)
-		task.delay(0.2, function()
+		Tween(card, { Position = UDim2.new(1, 24, 0, 0), BackgroundTransparency = 1 }, 0.16, EASE_SOFT)
+		Tween(shadow, { Transparency = 1 }, 0.16)
+		task.delay(0.16, function()
 			if card then card:Destroy() end
 		end)
 	end
 	closeBtn.MouseButton1Click:Connect(Dismiss)
 
-	-- Slide + fade + shadow fade-in
 	card.BackgroundTransparency = 1
-	card.Position = UDim2.new(1, 40, 0, 0)
-	Tween(card, { Position = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 0 }, 0.25, Enum.EasingStyle.Back)
-	Tween(shadow, { Transparency = 0.55 }, 0.3)
+	card.Position = UDim2.new(1, 24, 0, 0)
+	Tween(card, { Position = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 0 }, 0.2, EASE_SOFT)
+	Tween(shadow, { Transparency = 0.55 }, 0.25)
 
 	if config.Duration then
 		if progressFill then
@@ -506,8 +553,8 @@ function NovaUI:CreateWindow(config)
 		theme = Themes[config.Theme]
 		NovaUI.Theme = theme
 	end
-	if config.IconProvider then
-		NovaUI.IconProvider = config.IconProvider
+	if config.Icons then
+		NovaUI.Icons = config.Icons
 	end
 
 	local size = config.Size or UDim2.fromOffset(600, 480)
@@ -532,7 +579,7 @@ function NovaUI:CreateWindow(config)
 			BackgroundColor3 = theme.ElementBackgroundHover,
 			BackgroundTransparency = 1,
 			Visible = false,
-			ZIndex = 100,
+			ZIndex = 500,
 			AutomaticSize = Enum.AutomaticSize.X,
 			Size = UDim2.new(0, 0, 0, 24),
 			Parent = ScreenGui,
@@ -543,7 +590,7 @@ function NovaUI:CreateWindow(config)
 			tooltip.Position = UDim2.fromOffset(button.AbsolutePosition.X + button.AbsoluteSize.X + 8, button.AbsolutePosition.Y + button.AbsoluteSize.Y / 2 - 12)
 			tooltip.Visible = true
 			tooltip.BackgroundTransparency = 1
-			Tween(tooltip, { BackgroundTransparency = 0 }, 0.1)
+			Tween(tooltip, { BackgroundTransparency = 0 }, 0.08)
 		end)
 		button.MouseLeave:Connect(function()
 			tooltip.Visible = false
@@ -551,7 +598,7 @@ function NovaUI:CreateWindow(config)
 		return tooltip
 	end
 
-	-- Small reusable icon-button constructor (Lucide icon w/ text fallback,
+	-- Small reusable icon-button constructor (icon w/ text fallback,
 	-- hover tint, hover-scale pop). Used for chrome + sidebar buttons.
 	local function MakeIconButton(parent, sizePx, iconName, fallbackText, iconSize)
 		local btn = New("TextButton", {
@@ -564,13 +611,13 @@ function NovaUI:CreateWindow(config)
 		})
 		Round(btn, math.floor(sizePx / 2) - 3)
 		local state = { handle = SetButtonIcon(btn, iconName, fallbackText, iconSize or 14, theme.SubText) }
-		AddHoverScale(btn, 1.1)
+		AddHoverScale(btn, 1.08)
 		btn.MouseEnter:Connect(function()
-			Tween(btn, { BackgroundTransparency = 0.85 }, 0.12)
+			Tween(btn, { BackgroundTransparency = 0.85 }, 0.1)
 			state.handle.SetColor(theme.Text)
 		end)
 		btn.MouseLeave:Connect(function()
-			Tween(btn, { BackgroundTransparency = 1 }, 0.12)
+			Tween(btn, { BackgroundTransparency = 1 }, 0.1)
 			state.handle.SetColor(theme.SubText)
 		end)
 		return {
@@ -601,13 +648,79 @@ function NovaUI:CreateWindow(config)
 	Round(Main, 14)
 	Stroke(Main, theme.Border, 1)
 	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 30 })
+	local mainScale = New("UIScale", { Scale = 0.97, Parent = Main })
 
-	-- Opening animation: pop + fade in
+	-- Opening animation: a restrained fade + tiny scale-up (no bounce).
 	do
 		local targetAcrylicTransparency = config.Acrylic and 0.06 or 0
-		Main.Size = UDim2.new(size.X.Scale, size.X.Offset * 0.94, size.Y.Scale, size.Y.Offset * 0.94)
-		Tween(Main, { Size = size, BackgroundTransparency = targetAcrylicTransparency }, 0.28, Enum.EasingStyle.Back)
-		Tween(Shadow, { Transparency = 0.5 }, 0.3)
+		Tween(mainScale, { Scale = 1 }, 0.18, EASE_SOFT)
+		Tween(Main, { BackgroundTransparency = targetAcrylicTransparency }, 0.2)
+		Tween(Shadow, { Transparency = 0.5 }, 0.25)
+	end
+
+	--=========================================================================
+	-- OVERLAY (dropdown lists / colorpickers / config selector render here,
+	-- as a ScreenGui-level sibling of Main, so they're always on top and
+	-- never occluded by other rows — and they auto-close on outside click)
+	--=========================================================================
+
+	local Overlay = New("Frame", {
+		Name = "Overlay",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		ZIndex = 900,
+		Parent = ScreenGui,
+	})
+	local PopupCatcher = New("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Size = UDim2.new(1, 0, 1, 0),
+		Visible = false,
+		ZIndex = 899,
+		Parent = Overlay,
+	})
+
+	local currentPopup = nil
+	local function ClosePopup()
+		if currentPopup then
+			currentPopup.Visible = false
+			currentPopup = nil
+		end
+		PopupCatcher.Visible = false
+	end
+	PopupCatcher.MouseButton1Click:Connect(ClosePopup)
+
+	--- Opens `popup` (reparented into Overlay) anchored just below/aligned
+	--- to `anchorButton`. opts.Align = "left" (default) or "right".
+	--- opts.Gap = pixel gap below the anchor (default 6).
+	local function OpenPopup(popup, anchorButton, opts)
+		opts = opts or {}
+		if currentPopup == popup then
+			ClosePopup()
+			return
+		end
+		ClosePopup()
+		popup.Parent = Overlay
+		popup.ZIndex = 901
+
+		local anchorPos = anchorButton.AbsolutePosition
+		local anchorSize = anchorButton.AbsoluteSize
+		local popupWidth = popup.Size.X.Offset
+		local screenSize = Overlay.AbsoluteSize
+
+		local x = anchorPos.X
+		if opts.Align == "right" then
+			x = anchorPos.X + anchorSize.X - popupWidth
+		end
+		x = math.clamp(x, 4, math.max(4, screenSize.X - popupWidth - 4))
+
+		popup.Position = UDim2.fromOffset(x, anchorPos.Y + anchorSize.Y + (opts.Gap or 6))
+		popup.Visible = true
+		PopIn(popup)
+		PopupCatcher.Visible = true
+
+		currentPopup = popup
 	end
 
 	--=========================================================================
@@ -651,7 +764,7 @@ function NovaUI:CreateWindow(config)
 		Name = "TabRail",
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 0, 0, 56),
-		Size = UDim2.new(1, 0, 1, -100),
+		Size = UDim2.new(1, 0, 1, -132),
 		CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollBarThickness = 0,
@@ -666,7 +779,7 @@ function NovaUI:CreateWindow(config)
 	})
 
 	-- Populated below, after Window:AddSidebarButton exists — either with
-	-- config.SidebarButtons (fully customizable Lucide icon buttons) or a
+	-- config.SidebarButtons (fully customizable icon buttons) or a
 	-- sensible default (collapse + profile).
 	local SidebarFooter = New("Frame", {
 		BackgroundTransparency = 1,
@@ -702,6 +815,12 @@ function NovaUI:CreateWindow(config)
 	})
 	Pad(ContentTopBar, 20, 14, 20, 14)
 
+	-- Only the sidebar logo is a drag handle. Deliberately NOT any part of
+	-- the content top bar — Roblox's InputBegan/InputChanged fire on every
+	-- GuiObject under the cursor regardless of Z-order, so an invisible
+	-- "drag background" behind the search box/selector/chrome buttons would
+	-- still fight with their clicks (this is why minimize/fullscreen/search
+	-- could misbehave before).
 	local TopBarRow = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(1, 0, 1, 0),
@@ -762,6 +881,7 @@ function NovaUI:CreateWindow(config)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Size = UDim2.new(1, -20, 1, 0),
 		LayoutOrder = 2,
+		ZIndex = 2,
 		Parent = SearchPill,
 	})
 
@@ -772,6 +892,7 @@ function NovaUI:CreateWindow(config)
 		Size = UDim2.new(0, 176, 1, 0),
 		AutoButtonColor = false,
 		LayoutOrder = 2,
+		ZIndex = 2,
 		Parent = TopBarRow,
 	})
 	Round(SelectorPill, 8)
@@ -834,26 +955,29 @@ function NovaUI:CreateWindow(config)
 		end
 	end
 
+	-- Fixed-width, opaque popup list (rendered in Overlay, never occluded).
 	local SelectorList = New("Frame", {
-		BackgroundColor3 = theme.ElementBackgroundHover,
+		BackgroundColor3 = theme.PopupBackground,
+		BackgroundTransparency = 0,
 		Visible = false,
-		ZIndex = 30,
 		Size = UDim2.new(0, 176, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		Parent = ContentTopBar,
+		Parent = Overlay,
 	})
 	Round(SelectorList, 8)
 	Stroke(SelectorList, theme.Border, 1)
+	AddShadow(SelectorList, { Transparency = 0.45, OffsetY = 6, Blur = 16 })
 	Pad(SelectorList, 4)
 	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorList })
 
 	-- Window chrome (minimize/fullscreen/close) — small, top-right corner.
-	-- All three render as real Lucide icons via MakeIconButton, falling back
+	-- All three render as real icons via MakeIconButton, falling back
 	-- to text glyphs automatically if no icon provider is hooked up.
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, 82, 1, 0),
 		LayoutOrder = 3,
+		ZIndex = 2,
 		Parent = TopBarRow,
 	})
 	New("UIListLayout", {
@@ -880,8 +1004,7 @@ function NovaUI:CreateWindow(config)
 		CloseBtn.SetColor(Color3.fromRGB(255, 100, 100))
 	end)
 
-	MakeDraggable(WindowHolder, LogoBox)
-	MakeDraggable(WindowHolder, ContentTopBar)
+	MakeDraggable(Main, LogoBox)
 
 	local PagesContainer = New("Frame", {
 		Name = "Pages",
@@ -899,7 +1022,6 @@ function NovaUI:CreateWindow(config)
 	Window._tabs = {}
 	Window._gui = ScreenGui
 	Window._main = Main
-	Window._holder = WindowHolder
 	Window._minimized = false
 	Window._fullscreen = false
 	Window._fullSize = size
@@ -922,28 +1044,29 @@ function NovaUI:CreateWindow(config)
 	function Window:ToggleMinimize()
 		self._minimized = not self._minimized
 		if self._minimized then
-			Tween(WindowHolder, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 56) }, 0.2)
+			self._preMinimizeSize = Main.Size
+			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 56) }, 0.18, EASE_SOFT)
 			Sidebar.Visible = false
 			ContentArea.Visible = false
 		else
 			Sidebar.Visible = true
 			ContentArea.Visible = true
-			Tween(WindowHolder, { Size = self._fullSize }, 0.2)
+			Tween(Main, { Size = self._preMinimizeSize or self._fullSize }, 0.18, EASE_SOFT)
 		end
 	end
 
 	--- Toggles the window to fill (most of) the screen and back. Swaps the
-	--- chrome icon between "maximize" and "minimize-2" via Lucide.
+	--- chrome icon between "maximize" and "minimize-2".
 	function Window:ToggleFullscreen()
 		self._fullscreen = not self._fullscreen
 		if self._fullscreen then
-			self._savedHolderSize = WindowHolder.Size
+			self._savedSize = Main.Size
 			local camera = Workspace.CurrentCamera
 			local viewport = (camera and camera.ViewportSize) or Vector2.new(1280, 720)
-			Tween(WindowHolder, { Size = UDim2.fromOffset(viewport.X - 32, viewport.Y - 32) }, 0.25, Enum.EasingStyle.Quint)
+			Tween(Main, { Size = UDim2.fromOffset(viewport.X - 32, viewport.Y - 32) }, 0.2, EASE_SOFT)
 			FullscreenBtn.SetIcon("minimize-2", "\226\150\163")
 		else
-			Tween(WindowHolder, { Size = self._savedHolderSize or self._fullSize }, 0.25, Enum.EasingStyle.Quint)
+			Tween(Main, { Size = self._savedSize or self._fullSize }, 0.2, EASE_SOFT)
 			FullscreenBtn.SetIcon("maximize", "\226\150\162")
 		end
 	end
@@ -958,11 +1081,12 @@ function NovaUI:CreateWindow(config)
 	end
 
 	function Window:Destroy()
+		ClosePopup()
 		ScreenGui:Destroy()
 	end
 
 	--- Window:AddSidebarButton({ Icon, FallbackText, Tooltip, Callback, Order })
-	--- Appends a fully customizable Lucide icon button to the bottom of the
+	--- Appends a fully customizable icon button to the bottom of the
 	--- sidebar rail. Pass `config.SidebarButtons` (an array of these same
 	--- tables) to CreateWindow to replace the default set entirely.
 	function Window:AddSidebarButton(cfg)
@@ -1035,24 +1159,21 @@ function NovaUI:CreateWindow(config)
 				AutoButtonColor = false,
 				Size = UDim2.new(1, 0, 0, 26),
 				LayoutOrder = i,
-				ZIndex = 31,
 				Parent = SelectorList,
 			})
 			Round(btn, 4)
 			Pad(btn, 8, 0, 8, 0)
-			btn.MouseEnter:Connect(function() btn.BackgroundTransparency = 0.85 end)
-			btn.MouseLeave:Connect(function() btn.BackgroundTransparency = 1 end)
+			btn.MouseEnter:Connect(function() Tween(btn, { BackgroundTransparency = 0.85 }, 0.08) end)
+			btn.MouseLeave:Connect(function() Tween(btn, { BackgroundTransparency = 1 }, 0.08) end)
 			btn.MouseButton1Click:Connect(function()
 				ConfigSelector:SetValue(name)
-				SelectorList.Visible = false
+				ClosePopup()
 			end)
 			table.insert(ConfigSelector._buttons, btn)
 		end
 	end
 	SelectorPill.MouseButton1Click:Connect(function()
-		local opening = not SelectorList.Visible
-		SelectorList.Visible = opening
-		if opening then PopIn(SelectorList) end
+		OpenPopup(SelectorList, SelectorPill, { Align = "left" })
 	end)
 	Window.ConfigSelector = ConfigSelector
 	Window.Search = { Box = SearchBox }
@@ -1060,20 +1181,21 @@ function NovaUI:CreateWindow(config)
 	function Window:SelectTab(index)
 		local tab = self._tabs[index]
 		if not tab then return end
+		ClosePopup()
 		local previousIndex = self._activeTabIndex
 		self._activeTabIndex = index
 		for i, t in ipairs(self._tabs) do
 			local active = (i == index)
 			if active then
 				t._page.Visible = true
-				t._page.Position = UDim2.new(0, (i > previousIndex) and 14 or -14, 0, 0)
-				Tween(t._page, { Position = UDim2.new(0, 0, 0, 0) }, 0.18, Enum.EasingStyle.Quint)
+				t._page.Position = UDim2.new(0, (i > previousIndex) and 8 or -8, 0, 0)
+				Tween(t._page, { Position = UDim2.new(0, 0, 0, 0) }, 0.14, EASE)
 			elseif i ~= index then
 				t._page.Visible = false
 			end
-			Tween(t._button, { BackgroundTransparency = active and 0.85 or 1 }, 0.12)
+			Tween(t._button, { BackgroundTransparency = active and 0.85 or 1 }, 0.1)
 			if t._icon then
-				Tween(t._icon, { ImageColor3 = active and theme.Accent or theme.SubText }, 0.12)
+				Tween(t._icon, { ImageColor3 = active and theme.Accent or theme.SubText }, 0.1)
 			end
 			if t._fallbackLabel then
 				t._fallbackLabel.TextColor3 = active and theme.Accent or theme.SubText
@@ -1086,11 +1208,12 @@ function NovaUI:CreateWindow(config)
 	function Window:Dialog(cfg)
 		local overlay = New("Frame", {
 			BackgroundColor3 = Color3.new(0, 0, 0),
-			BackgroundTransparency = 0.4,
+			BackgroundTransparency = 1,
 			Size = UDim2.new(1, 0, 1, 0),
 			ZIndex = 50,
 			Parent = Main,
 		})
+		Tween(overlay, { BackgroundTransparency = 0.4 }, 0.15)
 
 		local box = New("Frame", {
 			BackgroundColor3 = theme.SecondaryBackground,
@@ -1104,6 +1227,8 @@ function NovaUI:CreateWindow(config)
 		Round(box, 8)
 		Stroke(box, theme.Border, 1)
 		Pad(box, 16)
+		local boxScale = New("UIScale", { Scale = 0.96, Parent = box })
+		Tween(boxScale, { Scale = 1 }, 0.15, EASE_SOFT)
 
 		New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10), Parent = box })
 
@@ -1172,12 +1297,12 @@ function NovaUI:CreateWindow(config)
 	end
 
 	--=========================================================================
-	-- TAB
+	-- TAB (only holds Sections — see Tab:AddSection below)
 	--=========================================================================
 
 	function Window:AddTab(tabConfig)
 		tabConfig = tabConfig or {}
-		local index = #self._tabs + 1
+		local tabIndex = #self._tabs + 1
 
 		local button = New("TextButton", {
 			Text = "",
@@ -1185,7 +1310,7 @@ function NovaUI:CreateWindow(config)
 			BackgroundTransparency = 1,
 			Size = UDim2.new(0, 40, 0, 40),
 			AutoButtonColor = false,
-			LayoutOrder = index,
+			LayoutOrder = tabIndex,
 			Parent = TabRailScroll,
 		})
 		Round(button, 10)
@@ -1209,18 +1334,17 @@ function NovaUI:CreateWindow(config)
 			})
 		end
 
-		-- Tooltip + hover-scale pop (parented to ScreenGui so it isn't clipped by Main)
-		AttachTooltip(button, tabConfig.Title or ("Tab " .. index))
-		AddHoverScale(button, 1.1)
+		AttachTooltip(button, tabConfig.Title or ("Tab " .. tabIndex))
+		AddHoverScale(button, 1.08)
 
 		button.MouseEnter:Connect(function()
-			if index ~= Window._activeTabIndex then
-				Tween(button, { BackgroundTransparency = 0.9 }, 0.12)
+			if tabIndex ~= Window._activeTabIndex then
+				Tween(button, { BackgroundTransparency = 0.9 }, 0.1)
 			end
 		end)
 		button.MouseLeave:Connect(function()
-			if index ~= Window._activeTabIndex then
-				Tween(button, { BackgroundTransparency = 1 }, 0.12)
+			if tabIndex ~= Window._activeTabIndex then
+				Tween(button, { BackgroundTransparency = 1 }, 0.1)
 			end
 		end)
 
@@ -1232,803 +1356,28 @@ function NovaUI:CreateWindow(config)
 			ScrollBarThickness = 3,
 			ScrollBarImageColor3 = theme.Border,
 			BorderSizePixel = 0,
-			Visible = index == 1,
+			Visible = tabIndex == 1,
 			Parent = PagesContainer,
 		})
 		Pad(page, 20, 4, 20, 20)
-		New("UIListLayout", {
-			SortOrder = Enum.SortOrder.LayoutOrder,
-			Padding = UDim.new(0, 10),
-			Parent = page,
-		})
 
 		local Tab = { _page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel, _columns = nil, _columnsFrame = nil }
 
 		button.MouseButton1Click:Connect(function()
-			Window:SelectTab(index)
+			Window:SelectTab(tabIndex)
 		end)
 
-		if index == 1 then
+		if tabIndex == 1 then
 			button.BackgroundTransparency = 0.85
 			if iconImage then iconImage.ImageColor3 = theme.Accent end
 			if fallbackLabel then fallbackLabel.TextColor3 = theme.Accent end
 		end
 
 		--=====================================================================
-		-- CLASSIC ELEMENTS (single-column card style — still available,
-		-- handy for a Settings tab, forms, etc.)
-		--=====================================================================
-
-		local function BaseCard(height, layoutOrder)
-			local card = New("Frame", {
-				BackgroundColor3 = theme.ElementBackground,
-				Size = UDim2.new(1, 0, 0, height or 46),
-				LayoutOrder = layoutOrder or (#page:GetChildren()),
-				Parent = page,
-			})
-			Round(card, 8)
-			AppearAnimate(card)
-			return card
-		end
-
-		local function TitleDesc(parent, title, description, rightInset)
-			local box = New("Frame", {
-				BackgroundTransparency = 1,
-				Position = UDim2.new(0, 12, 0, 0),
-				Size = UDim2.new(1, -(24 + (rightInset or 0)), 1, 0),
-				Parent = parent,
-			})
-			New("UIListLayout", {
-				SortOrder = Enum.SortOrder.LayoutOrder,
-				VerticalAlignment = Enum.VerticalAlignment.Center,
-				Parent = box,
-			})
-			New("TextLabel", {
-				Text = title or "",
-				Font = Enum.Font.GothamMedium,
-				TextSize = 13,
-				TextColor3 = theme.Text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				BackgroundTransparency = 1,
-				Size = UDim2.new(1, 0, 0, 16),
-				Parent = box,
-			})
-			if description then
-				New("TextLabel", {
-					Text = description,
-					Font = Enum.Font.Gotham,
-					TextSize = 11,
-					TextColor3 = theme.SubText,
-					TextXAlignment = Enum.TextXAlignment.Left,
-					TextWrapped = true,
-					BackgroundTransparency = 1,
-					Size = UDim2.new(1, 0, 0, 14),
-					Parent = box,
-				})
-			end
-			return box
-		end
-
-		--- Tab:AddParagraph({ Title, Content })
-		function Tab:AddParagraph(cfg)
-			local card = New("Frame", {
-				BackgroundColor3 = theme.ElementBackground,
-				Size = UDim2.new(1, 0, 0, 0),
-				AutomaticSize = Enum.AutomaticSize.Y,
-				Parent = page,
-			})
-			Round(card, 8)
-			Pad(card, 12)
-			New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = card })
-			New("TextLabel", {
-				Text = cfg.Title or "",
-				Font = Enum.Font.GothamBold,
-				TextSize = 13,
-				TextColor3 = theme.Text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				BackgroundTransparency = 1,
-				Size = UDim2.new(1, 0, 0, 16),
-				Parent = card,
-			})
-			New("TextLabel", {
-				Text = cfg.Content or "",
-				Font = Enum.Font.Gotham,
-				TextSize = 12,
-				TextColor3 = theme.SubText,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				TextWrapped = true,
-				BackgroundTransparency = 1,
-				Size = UDim2.new(1, 0, 0, 0),
-				AutomaticSize = Enum.AutomaticSize.Y,
-				Parent = card,
-			})
-			return card
-		end
-
-		--- Tab:AddButton({ Title, Description, Callback })
-		function Tab:AddButton(cfg)
-			local card = BaseCard(46)
-			TitleDesc(card, cfg.Title, cfg.Description, 90)
-
-			local btn = New("TextButton", {
-				Text = "Run",
-				Font = Enum.Font.GothamMedium,
-				TextSize = 12,
-				TextColor3 = theme.Text,
-				BackgroundColor3 = theme.Accent,
-				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				Size = UDim2.new(0, 70, 0, 26),
-				Parent = card,
-			})
-			Round(btn, 6)
-			btn.MouseButton1Click:Connect(function()
-				if cfg.Callback then cfg.Callback() end
-			end)
-			return { Instance = card }
-		end
-
-		--- Tab:AddToggle(id, { Title, Description, Default })
-		function Tab:AddToggle(id, cfg)
-			local card = BaseCard(46)
-			TitleDesc(card, cfg.Title, cfg.Description, 60)
-
-			local track = New("Frame", {
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				Size = UDim2.new(0, 38, 0, 20),
-				Parent = card,
-			})
-			Round(track, 10)
-			local knob = New("Frame", {
-				BackgroundColor3 = theme.Text,
-				AnchorPoint = Vector2.new(0, 0.5),
-				Position = UDim2.new(0, 2, 0.5, 0),
-				Size = UDim2.new(0, 16, 0, 16),
-				Parent = track,
-			})
-			Round(knob, 8)
-
-			local clickArea = New("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = track })
-
-			local Toggle = { Value = cfg.Default or false, Changed = Signal.new() }
-
-			local function Render(animate)
-				local on = Toggle.Value
-				local trackColor = on and theme.Accent or theme.ElementBackgroundHover
-				local knobPos = on and UDim2.new(1, -18, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
-				if animate then
-					Tween(track, { BackgroundColor3 = trackColor }, 0.15)
-					Tween(knob, { Position = knobPos }, 0.15)
-				else
-					track.BackgroundColor3 = trackColor
-					knob.Position = knobPos
-				end
-			end
-			Render(false)
-
-			function Toggle:SetValue(value)
-				Toggle.Value = value
-				Render(true)
-				Toggle.Changed:Fire(value)
-			end
-
-			function Toggle:OnChanged(fn)
-				Toggle.Changed:Connect(fn)
-			end
-
-			clickArea.MouseButton1Click:Connect(function()
-				Toggle:SetValue(not Toggle.Value)
-			end)
-
-			NovaUI.Options[id] = Toggle
-			return Toggle
-		end
-
-		--- Tab:AddSlider(id, { Title, Description, Default, Min, Max, Rounding, Callback })
-		function Tab:AddSlider(id, cfg)
-			local card = BaseCard(52)
-			local min, max = cfg.Min or 0, cfg.Max or 100
-			local rounding = cfg.Rounding or 0
-
-			local box = New("Frame", {
-				BackgroundTransparency = 1,
-				Position = UDim2.new(0, 12, 0, 2),
-				Size = UDim2.new(1, -24, 0, 32),
-				Parent = card,
-			})
-
-			New("TextLabel", {
-				Text = cfg.Title or "",
-				Font = Enum.Font.GothamMedium,
-				TextSize = 13,
-				TextColor3 = theme.Text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				BackgroundTransparency = 1,
-				Size = UDim2.new(0.6, 0, 0, 16),
-				Parent = box,
-			})
-
-			local valueLabel = New("TextLabel", {
-				Text = tostring(cfg.Default or min),
-				Font = Enum.Font.Gotham,
-				TextSize = 12,
-				TextColor3 = theme.SubText,
-				TextXAlignment = Enum.TextXAlignment.Right,
-				BackgroundTransparency = 1,
-				Position = UDim2.new(0.6, 0, 0, 0),
-				Size = UDim2.new(0.4, 0, 0, 16),
-				Parent = box,
-			})
-
-			local track = New("Frame", {
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				Position = UDim2.new(0, 0, 0, 22),
-				Size = UDim2.new(1, 0, 0, 6),
-				Parent = box,
-			})
-			Round(track, 3)
-			local fill = New("Frame", {
-				BackgroundColor3 = theme.Accent,
-				Size = UDim2.new(0, 0, 1, 0),
-				Parent = track,
-			})
-			Round(fill, 3)
-			local knob = New("Frame", {
-				BackgroundColor3 = theme.Text,
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0, 0, 0.5, 0),
-				Size = UDim2.new(0, 12, 0, 12),
-				ZIndex = 2,
-				Parent = track,
-			})
-			Round(knob, 6)
-
-			local Slider = { Value = cfg.Default or min, Changed = Signal.new() }
-
-			local function ApplyRounding(v)
-				if rounding <= 0 then return math.floor(v + 0.5) end
-				local mult = 10 ^ rounding
-				return math.floor(v * mult + 0.5) / mult
-			end
-
-			local function Render(v)
-				v = math.clamp(v, min, max)
-				local alpha = (max ~= min) and (v - min) / (max - min) or 0
-				fill.Size = UDim2.new(alpha, 0, 1, 0)
-				knob.Position = UDim2.new(alpha, 0, 0.5, 0)
-				valueLabel.Text = tostring(v)
-			end
-			Render(Slider.Value)
-
-			function Slider:SetValue(v)
-				v = ApplyRounding(v)
-				Slider.Value = v
-				Render(v)
-				Slider.Changed:Fire(v)
-				if cfg.Callback then cfg.Callback(v) end
-			end
-
-			function Slider:OnChanged(fn)
-				Slider.Changed:Connect(fn)
-			end
-
-			local dragging = false
-			local function UpdateFromInputPos(x)
-				local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-				local v = min + rel * (max - min)
-				Slider:SetValue(v)
-			end
-
-			track.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-					dragging = true
-					UpdateFromInputPos(input.Position.X)
-				end
-			end)
-			UserInputService.InputChanged:Connect(function(input)
-				if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-					UpdateFromInputPos(input.Position.X)
-				end
-			end)
-			UserInputService.InputEnded:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-					dragging = false
-				end
-			end)
-
-			NovaUI.Options[id] = Slider
-			return Slider
-		end
-
-		--- Tab:AddDropdown(id, { Title, Description, Values, Multi, Default })
-		function Tab:AddDropdown(id, cfg)
-			local values = cfg.Values or {}
-			local multi = cfg.Multi or false
-
-			local card = BaseCard(46)
-			TitleDesc(card, cfg.Title, cfg.Description, 130)
-
-			local selectedBtn = New("TextButton", {
-				Text = "",
-				Font = Enum.Font.Gotham,
-				TextSize = 12,
-				TextColor3 = theme.SubText,
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				Size = UDim2.new(0, 120, 0, 28),
-				AutoButtonColor = false,
-				Parent = card,
-			})
-			Round(selectedBtn, 6)
-			Pad(selectedBtn, 8, 0, 8, 0)
-			selectedBtn.TextXAlignment = Enum.TextXAlignment.Left
-			selectedBtn.TextTruncate = Enum.TextTruncate.AtEnd
-
-			local listFrame = New("Frame", {
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				Visible = false,
-				ZIndex = 20,
-				Size = UDim2.new(0, 180, 0, math.min(#values, 6) * 28 + 8),
-				Parent = card,
-			})
-			Round(listFrame, 6)
-			Stroke(listFrame, theme.Border, 1)
-
-			local listScroll = New("ScrollingFrame", {
-				BackgroundTransparency = 1,
-				Size = UDim2.new(1, 0, 1, 0),
-				CanvasSize = UDim2.new(0, 0, 0, 0),
-				AutomaticCanvasSize = Enum.AutomaticSize.Y,
-				ScrollBarThickness = 2,
-				BorderSizePixel = 0,
-				ZIndex = 20,
-				Parent = listFrame,
-			})
-			Pad(listScroll, 4)
-			New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = listScroll })
-
-			local Dropdown = { Value = multi and {} or nil, Changed = Signal.new(), _optionButtons = {} }
-
-			local function LabelForValue()
-				if multi then
-					local names = {}
-					for name, on in pairs(Dropdown.Value or {}) do
-						if on then table.insert(names, name) end
-					end
-					return #names > 0 and table.concat(names, ", ") or "None"
-				else
-					return tostring(Dropdown.Value or "None")
-				end
-			end
-
-			local function RefreshButton()
-				selectedBtn.Text = LabelForValue()
-			end
-
-			local function RefreshHighlights()
-				for name, btn in pairs(Dropdown._optionButtons) do
-					local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
-					btn.BackgroundTransparency = active and 0.85 or 1
-					btn.TextColor3 = active and theme.Accent or theme.Text
-				end
-			end
-
-			function Dropdown:OnChanged(fn)
-				Dropdown.Changed:Connect(fn)
-			end
-
-			function Dropdown:SetValue(value)
-				if multi then
-					local map = {}
-					if typeof(value) == "table" then
-						if value[1] ~= nil then
-							for _, name in ipairs(value) do map[name] = true end
-						else
-							for name, on in pairs(value) do map[name] = on end
-						end
-					end
-					Dropdown.Value = map
-				else
-					Dropdown.Value = value
-				end
-				RefreshButton()
-				RefreshHighlights()
-				Dropdown.Changed:Fire(Dropdown.Value)
-			end
-
-			for i, name in ipairs(values) do
-				local optBtn = New("TextButton", {
-					Text = tostring(name),
-					Font = Enum.Font.Gotham,
-					TextSize = 12,
-					TextColor3 = theme.Text,
-					TextXAlignment = Enum.TextXAlignment.Left,
-					BackgroundColor3 = theme.Accent,
-					BackgroundTransparency = 1,
-					AutoButtonColor = false,
-					Size = UDim2.new(1, 0, 0, 26),
-					LayoutOrder = i,
-					ZIndex = 21,
-					Parent = listScroll,
-				})
-				Round(optBtn, 4)
-				Pad(optBtn, 8, 0, 8, 0)
-				Dropdown._optionButtons[tostring(name)] = optBtn
-
-				optBtn.MouseButton1Click:Connect(function()
-					if multi then
-						local key = tostring(name)
-						local newMap = {}
-						for k, v in pairs(Dropdown.Value) do newMap[k] = v end
-						newMap[key] = not newMap[key]
-						Dropdown:SetValue(newMap)
-					else
-						Dropdown:SetValue(tostring(name))
-						listFrame.Visible = false
-					end
-				end)
-			end
-
-			selectedBtn.MouseButton1Click:Connect(function()
-				local opening = not listFrame.Visible
-				listFrame.Visible = opening
-				if opening then PopIn(listFrame) end
-			end)
-
-			if cfg.Default ~= nil then
-				Dropdown:SetValue(cfg.Default)
-			else
-				RefreshButton()
-			end
-
-			NovaUI.Options[id] = Dropdown
-			return Dropdown
-		end
-
-		--- Tab:AddColorpicker(id, { Title, Description, Default, Transparency })
-		function Tab:AddColorpicker(id, cfg)
-			local card = BaseCard(46)
-			TitleDesc(card, cfg.Title, cfg.Description, 50)
-
-			local swatch = New("TextButton", {
-				Text = "",
-				BackgroundColor3 = cfg.Default or Color3.fromRGB(255, 255, 255),
-				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				Size = UDim2.new(0, 28, 0, 20),
-				Parent = card,
-			})
-			Round(swatch, 5)
-			Stroke(swatch, theme.Border, 1)
-
-			local popup = New("Frame", {
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				Visible = false,
-				ZIndex = 20,
-				Size = UDim2.new(0, 200, 0, cfg.Transparency ~= nil and 210 or 180),
-				Parent = card,
-			})
-			Round(popup, 8)
-			Stroke(popup, theme.Border, 1)
-			Pad(popup, 10)
-			New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = popup })
-
-			local svBox = New("Frame", {
-				BackgroundColor3 = Color3.fromRGB(255, 0, 0),
-				Size = UDim2.new(1, 0, 0, 100),
-				ZIndex = 21,
-				LayoutOrder = 1,
-				Parent = popup,
-			})
-			Round(svBox, 4)
-			New("UIGradient", { Color = ColorSequence.new(Color3.new(1,1,1), Color3.new(1,1,1)), Transparency = NumberSequence.new(0, 1), Parent = svBox })
-			local blackOverlay = New("Frame", { BackgroundColor3 = Color3.new(0,0,0), BackgroundTransparency = 1, Size = UDim2.new(1,0,1,0), ZIndex = 21, Parent = svBox })
-			New("UIGradient", { Color = ColorSequence.new(Color3.new(0,0,0), Color3.new(0,0,0)), Transparency = NumberSequence.new(1, 0), Rotation = 90, Parent = blackOverlay })
-
-			local svCursor = New("Frame", {
-				BackgroundColor3 = Color3.new(1,1,1),
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Size = UDim2.new(0, 8, 0, 8),
-				ZIndex = 22,
-				Parent = svBox,
-			})
-			Round(svCursor, 4)
-			Stroke(svCursor, Color3.new(0,0,0), 1)
-
-			local hueBar = New("Frame", {
-				Size = UDim2.new(1, 0, 0, 14),
-				ZIndex = 21,
-				LayoutOrder = 2,
-				Parent = popup,
-			})
-			Round(hueBar, 4)
-			New("UIGradient", {
-				Color = ColorSequence.new({
-					ColorSequenceKeypoint.new(0.00, Color3.fromHSV(0, 1, 1)),
-					ColorSequenceKeypoint.new(0.17, Color3.fromHSV(1/6, 1, 1)),
-					ColorSequenceKeypoint.new(0.33, Color3.fromHSV(2/6, 1, 1)),
-					ColorSequenceKeypoint.new(0.50, Color3.fromHSV(3/6, 1, 1)),
-					ColorSequenceKeypoint.new(0.67, Color3.fromHSV(4/6, 1, 1)),
-					ColorSequenceKeypoint.new(0.83, Color3.fromHSV(5/6, 1, 1)),
-					ColorSequenceKeypoint.new(1.00, Color3.fromHSV(1, 1, 1)),
-				}),
-				Parent = hueBar,
-			})
-			local hueCursor = New("Frame", {
-				BackgroundColor3 = Color3.new(1,1,1),
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.new(0, 0, 0.5, 0),
-				Size = UDim2.new(0, 4, 1, 4),
-				ZIndex = 22,
-				Parent = hueBar,
-			})
-
-			local alphaBar, alphaCursor
-			if cfg.Transparency ~= nil then
-				alphaBar = New("Frame", {
-					BackgroundColor3 = theme.ElementBackground,
-					Size = UDim2.new(1, 0, 0, 14),
-					ZIndex = 21,
-					LayoutOrder = 3,
-					Parent = popup,
-				})
-				Round(alphaBar, 4)
-				alphaCursor = New("Frame", {
-					BackgroundColor3 = Color3.new(1,1,1),
-					AnchorPoint = Vector2.new(0.5, 0.5),
-					Position = UDim2.new(0, 0, 0.5, 0),
-					Size = UDim2.new(0, 4, 1, 4),
-					ZIndex = 22,
-					Parent = alphaBar,
-				})
-			end
-
-			local Colorpicker = {
-				Value = cfg.Default or Color3.fromRGB(255, 255, 255),
-				Transparency = cfg.Transparency or 0,
-				Changed = Signal.new(),
-			}
-			local h, s, v = Color3.toHSV(Colorpicker.Value)
-
-			local function Render()
-				svBox.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
-				svCursor.Position = UDim2.new(s, 0, 1 - v, 0)
-				hueCursor.Position = UDim2.new(h, 0, 0.5, 0)
-				swatch.BackgroundColor3 = Colorpicker.Value
-				if alphaCursor then
-					alphaCursor.Position = UDim2.new(1 - Colorpicker.Transparency, 0, 0.5, 0)
-					alphaBar.BackgroundColor3 = Colorpicker.Value
-				end
-			end
-			Render()
-
-			function Colorpicker:OnChanged(fn)
-				Colorpicker.Changed:Connect(fn)
-			end
-
-			function Colorpicker:SetValueRGB(color)
-				Colorpicker.Value = color
-				h, s, v = Color3.toHSV(color)
-				Render()
-				Colorpicker.Changed:Fire()
-			end
-
-			local function Commit()
-				Colorpicker.Value = Color3.fromHSV(h, s, v)
-				Render()
-				Colorpicker.Changed:Fire()
-			end
-
-			local draggingSV, draggingHue, draggingAlpha = false, false, false
-
-			svBox.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 then draggingSV = true end
-			end)
-			hueBar.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 then draggingHue = true end
-			end)
-			if alphaBar then
-				alphaBar.InputBegan:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 then draggingAlpha = true end
-				end)
-			end
-			UserInputService.InputEnded:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 then
-					draggingSV, draggingHue, draggingAlpha = false, false, false
-				end
-			end)
-			UserInputService.InputChanged:Connect(function(input)
-				if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-				if draggingSV then
-					s = math.clamp((input.Position.X - svBox.AbsolutePosition.X) / svBox.AbsoluteSize.X, 0, 1)
-					v = 1 - math.clamp((input.Position.Y - svBox.AbsolutePosition.Y) / svBox.AbsoluteSize.Y, 0, 1)
-					Commit()
-				elseif draggingHue then
-					h = math.clamp((input.Position.X - hueBar.AbsolutePosition.X) / hueBar.AbsoluteSize.X, 0, 1)
-					Commit()
-				elseif draggingAlpha and alphaBar then
-					Colorpicker.Transparency = 1 - math.clamp((input.Position.X - alphaBar.AbsolutePosition.X) / alphaBar.AbsoluteSize.X, 0, 1)
-					Render()
-					Colorpicker.Changed:Fire()
-				end
-			end)
-
-			swatch.MouseButton1Click:Connect(function()
-				local opening = not popup.Visible
-				popup.Visible = opening
-				if opening then PopIn(popup) end
-			end)
-
-			NovaUI.Options[id] = Colorpicker
-			return Colorpicker
-		end
-
-		--- Tab:AddKeybind(id, { Title, Mode, Default, Callback, ChangedCallback })
-		function Tab:AddKeybind(id, cfg)
-			local card = BaseCard(46)
-			TitleDesc(card, cfg.Title, cfg.Description, 100)
-
-			local keyBtn = New("TextButton", {
-				Text = tostring(cfg.Default or "None"),
-				Font = Enum.Font.Gotham,
-				TextSize = 12,
-				TextColor3 = theme.Text,
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				Size = UDim2.new(0, 90, 0, 26),
-				Parent = card,
-			})
-			Round(keyBtn, 6)
-
-			local Keybind = {
-				Value = cfg.Default,
-				Mode = cfg.Mode or "Toggle",
-				Changed = Signal.new(),
-				Click = Signal.new(),
-				_state = false,
-				_listening = false,
-			}
-
-			function Keybind:OnChanged(fn) Keybind.Changed:Connect(fn) end
-			function Keybind:OnClick(fn) Keybind.Click:Connect(fn) end
-			function Keybind:GetState() return Keybind._state end
-
-			function Keybind:SetValue(key, mode)
-				Keybind.Value = key
-				if mode then Keybind.Mode = mode end
-				keyBtn.Text = tostring(key or "None")
-				Keybind.Changed:Fire(key)
-				if cfg.ChangedCallback then cfg.ChangedCallback(key) end
-			end
-
-			keyBtn.MouseButton1Click:Connect(function()
-				Keybind._listening = true
-				keyBtn.Text = "..."
-			end)
-
-			UserInputService.InputBegan:Connect(function(input, processed)
-				if Keybind._listening then
-					local keyName
-					if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
-					elseif input.UserInputType == Enum.UserInputType.MouseButton2 then keyName = "MB2"
-					elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
-					if keyName then
-						Keybind._listening = false
-						Keybind:SetValue(keyName)
-					end
-					return
-				end
-
-				if processed then return end
-				local matches = (input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode.Name == Keybind.Value)
-					or (input.UserInputType == Enum.UserInputType.MouseButton1 and Keybind.Value == "MB1")
-					or (input.UserInputType == Enum.UserInputType.MouseButton2 and Keybind.Value == "MB2")
-
-				if matches then
-					if Keybind.Mode == "Toggle" then
-						Keybind._state = not Keybind._state
-						if Keybind._state then
-							Keybind.Click:Fire()
-							if cfg.Callback then cfg.Callback(true) end
-						else
-							if cfg.Callback then cfg.Callback(false) end
-						end
-					elseif Keybind.Mode == "Hold" then
-						Keybind._state = true
-						if cfg.Callback then cfg.Callback(true) end
-					elseif Keybind.Mode == "Always" then
-						if cfg.Callback then cfg.Callback(true) end
-					end
-				end
-			end)
-
-			UserInputService.InputEnded:Connect(function(input)
-				if Keybind.Mode ~= "Hold" then return end
-				local keyName
-				if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
-				elseif input.UserInputType == Enum.UserInputType.MouseButton2 then keyName = "MB2"
-				elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
-				if keyName == Keybind.Value then
-					Keybind._state = false
-					if cfg.Callback then cfg.Callback(false) end
-				end
-			end)
-
-			NovaUI.Options[id] = Keybind
-			return Keybind
-		end
-
-		--- Tab:AddInput(id, { Title, Default, Placeholder, Numeric, Finished, Callback })
-		function Tab:AddInput(id, cfg)
-			local card = BaseCard(46)
-			TitleDesc(card, cfg.Title, cfg.Description, 130)
-
-			local box = New("Frame", {
-				BackgroundColor3 = theme.ElementBackgroundHover,
-				AnchorPoint = Vector2.new(1, 0.5),
-				Position = UDim2.new(1, -12, 0.5, 0),
-				Size = UDim2.new(0, 120, 0, 26),
-				Parent = card,
-			})
-			Round(box, 6)
-			Pad(box, 8, 0, 8, 0)
-
-			local textbox = New("TextBox", {
-				Text = cfg.Default or "",
-				PlaceholderText = cfg.Placeholder or "",
-				Font = Enum.Font.Gotham,
-				TextSize = 12,
-				TextColor3 = theme.Text,
-				PlaceholderColor3 = theme.SubText,
-				ClearTextOnFocus = false,
-				BackgroundTransparency = 1,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				Size = UDim2.new(1, 0, 1, 0),
-				Parent = box,
-			})
-
-			local Input = { Value = cfg.Default or "", Changed = Signal.new() }
-
-			function Input:OnChanged(fn) Input.Changed:Connect(fn) end
-			function Input:SetValue(text)
-				Input.Value = text
-				textbox.Text = text
-				Input.Changed:Fire(text)
-			end
-
-			if cfg.Numeric then
-				textbox:GetPropertyChangedSignal("Text"):Connect(function()
-					local filtered = textbox.Text:gsub("[^%d%.%-]", "")
-					if filtered ~= textbox.Text then
-						textbox.Text = filtered
-					end
-				end)
-			end
-
-			local function Fire()
-				Input.Value = textbox.Text
-				Input.Changed:Fire(textbox.Text)
-				if cfg.Callback then cfg.Callback(textbox.Text) end
-			end
-
-			if cfg.Finished then
-				textbox.FocusLost:Connect(function(enterPressed)
-					if enterPressed then Fire() end
-				end)
-			else
-				textbox:GetPropertyChangedSignal("Text"):Connect(Fire)
-			end
-
-			NovaUI.Options[id] = Input
-			return Input
-		end
-
-		--=====================================================================
-		-- SECTION / ROW — the grouped, two-column settings-list layout
+		-- SECTION — the only way to add content to a tab. Sections lay out
+		-- in one of two side-by-side columns; each row inside is a labeled
+		-- control (toggle/slider/dropdown/colorpicker/keybind/input/button)
+		-- or a plain paragraph.
 		--=====================================================================
 
 		--- Tab:AddSection({ Title, Column }) -> Section
@@ -2043,7 +1392,6 @@ function NovaUI:CreateWindow(config)
 					BackgroundTransparency = 1,
 					Size = UDim2.new(1, 0, 0, 0),
 					AutomaticSize = Enum.AutomaticSize.Y,
-					LayoutOrder = 999,
 					Parent = page,
 				})
 				New("UIListLayout", {
@@ -2101,59 +1449,89 @@ function NovaUI:CreateWindow(config)
 
 			local Section = { _rowCount = 0 }
 
-			--- Section:AddRow(id, {
-			---   Title, Type = "toggle"|"dropdown"|"slider"|"text",
-			---   Elevated = true,       -- renders as a raised card (use for the section's main on/off row)
-			---   Bold = true,           -- bold label even when not Elevated
-			---   Menu = true,           -- adds a "..." icon before the control (Elevated rows only)
-			---   -- toggle: Default
-			---   -- dropdown: Values, Multi, Default
-			---   -- slider: Default, Min, Max, Rounding, Suffix, Callback
-			---   -- text: Value (static, non-interactive)
-			--- })
-			function Section:AddRow(id, rowCfg)
+			-- Shared row shell used by every Section:AddX method below.
+			-- `controlWidth` is how much horizontal space to reserve on the
+			-- right for that row's control.
+			local function CreateRow(rowCfg, controlWidth)
 				rowCfg = rowCfg or {}
-				local rowType = rowCfg.Type or "toggle"
 				local elevated = rowCfg.Elevated and true or false
-				local rowHeight = elevated and 44 or 30
+				local hasDescription = rowCfg.Description ~= nil and rowCfg.Description ~= ""
+				local rowHeight = elevated and 44 or (hasDescription and 40 or 32)
 
 				Section._rowCount = Section._rowCount + 1
 				local row = New("Frame", {
-					BackgroundColor3 = theme.ElementBackground,
+					BackgroundColor3 = elevated and theme.ElementBackground or theme.ElementBackground,
 					BackgroundTransparency = elevated and 0 or 1,
 					Size = UDim2.new(1, 0, 0, rowHeight),
 					LayoutOrder = Section._rowCount,
 					Parent = sectionFrame,
 				})
-				if elevated then
-					Round(row, 8)
-					Pad(row, 12, 0, 12, 0)
-					AppearAnimate(row, math.min(Section._rowCount * 0.02, 0.15))
-				end
+				Round(row, 8)
+				Pad(row, elevated and 12 or 4, 0, elevated and 12 or 4, 0)
 
-				table.insert(Window._searchRows, { Instance = row, TitleLower = (rowCfg.Title or ""):lower(), TabIndex = index })
+				-- Every row gets a restrained fade+rise on creation, and a
+				-- subtle hover highlight — modern, not bouncy.
+				FadeSlideIn(row, math.min(Section._rowCount * 0.012, 0.1))
+				local hoverOnTransparency = elevated and 0 or 0.92
+				local hoverOffTransparency = elevated and 0 or 1
+				local baseColor = row.BackgroundColor3
+				row.MouseEnter:Connect(function()
+					if elevated then
+						Tween(row, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+					else
+						Tween(row, { BackgroundTransparency = hoverOnTransparency }, 0.1)
+					end
+				end)
+				row.MouseLeave:Connect(function()
+					if elevated then
+						Tween(row, { BackgroundColor3 = baseColor }, 0.1)
+					else
+						Tween(row, { BackgroundTransparency = hoverOffTransparency }, 0.1)
+					end
+				end)
 
-				local labelBold = elevated or rowCfg.Bold
-				local rightControlWidth = (rowType == "slider") and 150 or (rowType == "dropdown" and 110 or 38)
-				if rowCfg.Menu then rightControlWidth = rightControlWidth + 24 end
+				table.insert(Window._searchRows, { Instance = row, TitleLower = (rowCfg.Title or ""):lower(), TabIndex = tabIndex })
 
-				New("TextLabel", {
-					Text = rowCfg.Title or "",
-					Font = labelBold and Enum.Font.GothamMedium or Enum.Font.Gotham,
-					TextSize = elevated and 13 or 12.5,
-					TextColor3 = labelBold and theme.Text or theme.SubText,
-					TextXAlignment = Enum.TextXAlignment.Left,
+				local labelBox = New("Frame", {
 					BackgroundTransparency = 1,
-					Position = UDim2.new(0, elevated and 0 or 0, 0, 0),
-					Size = UDim2.new(1, -(rightControlWidth + 10), 1, 0),
+					Size = UDim2.new(1, -(controlWidth + 10), 1, 0),
 					Parent = row,
 				})
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Parent = labelBox,
+				})
+				New("TextLabel", {
+					Text = rowCfg.Title or "",
+					Font = elevated and Enum.Font.GothamMedium or Enum.Font.Gotham,
+					TextSize = elevated and 13 or 12.5,
+					TextColor3 = elevated and theme.Text or theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, 16),
+					Parent = labelBox,
+				})
+				if hasDescription then
+					New("TextLabel", {
+						Text = rowCfg.Description,
+						Font = Enum.Font.Gotham,
+						TextSize = 11,
+						TextColor3 = theme.SubText,
+						TextTransparency = 0.2,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						TextWrapped = true,
+						BackgroundTransparency = 1,
+						Size = UDim2.new(1, 0, 0, 14),
+						Parent = labelBox,
+					})
+				end
 
 				local controlHolder = New("Frame", {
 					BackgroundTransparency = 1,
 					AnchorPoint = Vector2.new(1, 0.5),
-					Position = UDim2.new(1, elevated and 0 or 0, 0.5, 0),
-					Size = UDim2.new(0, rightControlWidth, 1, 0),
+					Position = UDim2.new(1, 0, 0.5, 0),
+					Size = UDim2.new(0, controlWidth, 1, 0),
 					Parent = row,
 				})
 				New("UIListLayout", {
@@ -2173,7 +1551,7 @@ function NovaUI:CreateWindow(config)
 						TextColor3 = theme.SubText,
 						BackgroundTransparency = 1,
 						Size = UDim2.new(0, 20, 0, 20),
-						LayoutOrder = 1,
+						LayoutOrder = -1,
 						Parent = controlHolder,
 					})
 					if rowCfg.MenuCallback then
@@ -2181,305 +1559,763 @@ function NovaUI:CreateWindow(config)
 					end
 				end
 
-				if rowType == "toggle" then
-					local track = New("Frame", {
-						BackgroundColor3 = theme.ElementBackgroundHover,
-						Size = UDim2.new(0, 36, 0, 18),
-						LayoutOrder = 2,
-						Parent = controlHolder,
-					})
-					Round(track, 9)
-					local knob = New("Frame", {
-						BackgroundColor3 = theme.Text,
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.new(0, 2, 0.5, 0),
-						Size = UDim2.new(0, 14, 0, 14),
-						Parent = track,
-					})
-					Round(knob, 7)
-					local clickArea = New("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = track })
+				return row, controlHolder
+			end
 
-					local Toggle = { Value = rowCfg.Default or false, Changed = Signal.new() }
-					local function RenderToggle(animate)
-						local on = Toggle.Value
-						local trackColor = on and theme.Accent or theme.ElementBackgroundHover
-						local knobPos = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
-						if animate then
-							Tween(track, { BackgroundColor3 = trackColor }, 0.15)
-							Tween(knob, { Position = knobPos }, 0.15)
-						else
-							track.BackgroundColor3 = trackColor
-							knob.Position = knobPos
-						end
-					end
-					RenderToggle(false)
-					function Toggle:SetValue(value)
-						Toggle.Value = value
-						RenderToggle(true)
-						Toggle.Changed:Fire(value)
-						if rowCfg.Callback then rowCfg.Callback(value) end
-					end
-					function Toggle:OnChanged(fn) Toggle.Changed:Connect(fn) end
-					clickArea.MouseButton1Click:Connect(function() Toggle:SetValue(not Toggle.Value) end)
+			--- Section:AddToggle(id, { Title, Description, Default, Elevated, Menu, Callback })
+			function Section:AddToggle(id, cfg)
+				cfg = cfg or {}
+				local _, controlHolder = CreateRow(cfg, cfg.Menu and 60 or 36)
 
-					if id then NovaUI.Options[id] = Toggle end
-					return Toggle
+				local track = New("Frame", {
+					BackgroundColor3 = theme.ElementBackgroundHover,
+					Size = UDim2.new(0, 36, 0, 18),
+					Parent = controlHolder,
+				})
+				Round(track, 9)
+				local knob = New("Frame", {
+					BackgroundColor3 = theme.Text,
+					AnchorPoint = Vector2.new(0, 0.5),
+					Position = UDim2.new(0, 2, 0.5, 0),
+					Size = UDim2.new(0, 14, 0, 14),
+					Parent = track,
+				})
+				Round(knob, 7)
+				local clickArea = New("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = track })
 
-				elseif rowType == "dropdown" then
-					local values = rowCfg.Values or {}
-					local multi = rowCfg.Multi or false
-
-					local ddBtn = New("TextButton", {
-						Text = "",
-						Font = Enum.Font.Gotham,
-						TextSize = 12,
-						TextColor3 = theme.SubText,
-						BackgroundColor3 = theme.ElementBackgroundHover,
-						AutoButtonColor = false,
-						Size = UDim2.new(0, rowCfg.Menu and (rightControlWidth - 24) or rightControlWidth, 0, 26),
-						LayoutOrder = 2,
-						Parent = controlHolder,
-					})
-					Round(ddBtn, 6)
-					Pad(ddBtn, 8, 0, 22, 0)
-					ddBtn.TextXAlignment = Enum.TextXAlignment.Left
-					ddBtn.TextTruncate = Enum.TextTruncate.AtEnd
-
-					do
-						local icon = GetIcon("chevron-down", 10)
-						if icon then
-							icon.AnchorPoint = Vector2.new(1, 0.5)
-							icon.Position = UDim2.new(1, -6, 0.5, 0)
-							icon.ImageColor3 = theme.SubText
-							icon.Parent = ddBtn
-						else
-							New("TextLabel", {
-								Text = "\226\150\190",
-								Font = Enum.Font.Gotham,
-								TextSize = 9,
-								TextColor3 = theme.SubText,
-								BackgroundTransparency = 1,
-								AnchorPoint = Vector2.new(1, 0.5),
-								Position = UDim2.new(1, -6, 0.5, 0),
-								Size = UDim2.new(0, 10, 1, 0),
-								Parent = ddBtn,
-							})
-						end
-					end
-
-					local listFrame = New("Frame", {
-						BackgroundColor3 = theme.ElementBackgroundHover,
-						Visible = false,
-						ZIndex = 20,
-						Size = UDim2.new(0, 180, 0, math.min(#values, 6) * 28 + 8),
-						Parent = row,
-					})
-					Round(listFrame, 6)
-					Stroke(listFrame, theme.Border, 1)
-					local listScroll = New("ScrollingFrame", {
-						BackgroundTransparency = 1,
-						Size = UDim2.new(1, 0, 1, 0),
-						CanvasSize = UDim2.new(0, 0, 0, 0),
-						AutomaticCanvasSize = Enum.AutomaticSize.Y,
-						ScrollBarThickness = 2,
-						BorderSizePixel = 0,
-						ZIndex = 20,
-						Parent = listFrame,
-					})
-					Pad(listScroll, 4)
-					New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = listScroll })
-
-					local Dropdown = { Value = multi and {} or nil, Changed = Signal.new(), _optionButtons = {} }
-					local function LabelForValue()
-						if multi then
-							local names = {}
-							for name, on in pairs(Dropdown.Value or {}) do
-								if on then table.insert(names, name) end
-							end
-							return #names > 0 and table.concat(names, ", ") or "..."
-						else
-							return tostring(Dropdown.Value or "...")
-						end
-					end
-					local function RefreshButton() ddBtn.Text = LabelForValue() end
-					local function RefreshHighlights()
-						for name, btn in pairs(Dropdown._optionButtons) do
-							local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
-							btn.BackgroundTransparency = active and 0.85 or 1
-							btn.TextColor3 = active and theme.Accent or theme.Text
-						end
-					end
-					function Dropdown:OnChanged(fn) Dropdown.Changed:Connect(fn) end
-					function Dropdown:SetValue(value)
-						if multi then
-							local map = {}
-							if typeof(value) == "table" then
-								if value[1] ~= nil then
-									for _, name in ipairs(value) do map[name] = true end
-								else
-									for name, on in pairs(value) do map[name] = on end
-								end
-							end
-							Dropdown.Value = map
-						else
-							Dropdown.Value = value
-						end
-						RefreshButton()
-						RefreshHighlights()
-						Dropdown.Changed:Fire(Dropdown.Value)
-					end
-					for i, name in ipairs(values) do
-						local optBtn = New("TextButton", {
-							Text = tostring(name),
-							Font = Enum.Font.Gotham,
-							TextSize = 12,
-							TextColor3 = theme.Text,
-							TextXAlignment = Enum.TextXAlignment.Left,
-							BackgroundColor3 = theme.Accent,
-							BackgroundTransparency = 1,
-							AutoButtonColor = false,
-							Size = UDim2.new(1, 0, 0, 26),
-							LayoutOrder = i,
-							ZIndex = 21,
-							Parent = listScroll,
-						})
-						Round(optBtn, 4)
-						Pad(optBtn, 8, 0, 8, 0)
-						Dropdown._optionButtons[tostring(name)] = optBtn
-						optBtn.MouseButton1Click:Connect(function()
-							if multi then
-								local key = tostring(name)
-								local newMap = {}
-								for k, v in pairs(Dropdown.Value) do newMap[k] = v end
-								newMap[key] = not newMap[key]
-								Dropdown:SetValue(newMap)
-							else
-								Dropdown:SetValue(tostring(name))
-								listFrame.Visible = false
-							end
-						end)
-					end
-					ddBtn.MouseButton1Click:Connect(function()
-						listFrame.Position = UDim2.new(1, 0, 1, 4)
-						listFrame.AnchorPoint = Vector2.new(1, 0)
-						local opening = not listFrame.Visible
-						listFrame.Visible = opening
-						if opening then PopIn(listFrame) end
-					end)
-					if rowCfg.Default ~= nil then
-						Dropdown:SetValue(rowCfg.Default)
+				local Toggle = { Value = cfg.Default or false, Changed = Signal.new() }
+				local function Render(animate)
+					local on = Toggle.Value
+					local trackColor = on and theme.Accent or theme.ElementBackgroundHover
+					local knobPos = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
+					if animate then
+						Tween(track, { BackgroundColor3 = trackColor }, 0.12)
+						Tween(knob, { Position = knobPos }, 0.12)
 					else
-						RefreshButton()
+						track.BackgroundColor3 = trackColor
+						knob.Position = knobPos
 					end
+				end
+				Render(false)
+				function Toggle:SetValue(value)
+					Toggle.Value = value
+					Render(true)
+					Toggle.Changed:Fire(value)
+					if cfg.Callback then cfg.Callback(value) end
+				end
+				function Toggle:OnChanged(fn) Toggle.Changed:Connect(fn) end
+				clickArea.MouseButton1Click:Connect(function() Toggle:SetValue(not Toggle.Value) end)
 
-					if id then NovaUI.Options[id] = Dropdown end
-					return Dropdown
+				if id then NovaUI.Options[id] = Toggle end
+				return Toggle
+			end
 
-				elseif rowType == "slider" then
-					local min, max = rowCfg.Min or 0, rowCfg.Max or 100
-					local rounding = rowCfg.Rounding or 0
-					local suffix = rowCfg.Suffix or ""
+			--- Section:AddSlider(id, { Title, Description, Default, Min, Max, Rounding, Suffix, Elevated, Callback })
+			function Section:AddSlider(id, cfg)
+				cfg = cfg or {}
+				local min, max = cfg.Min or 0, cfg.Max or 100
+				local rounding = cfg.Rounding or 0
+				local suffix = cfg.Suffix or ""
+				local controlWidth = 160
 
-					local valueLabel = New("TextLabel", {
-						Text = tostring(rowCfg.Default or min) .. suffix,
+				local _, controlHolder = CreateRow(cfg, controlWidth)
+
+				local valueLabel = New("TextLabel", {
+					Text = tostring(cfg.Default or min) .. suffix,
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Right,
+					BackgroundTransparency = 1,
+					Size = UDim2.new(0, 44, 1, 0),
+					LayoutOrder = 1,
+					Parent = controlHolder,
+				})
+
+				local track = New("Frame", {
+					BackgroundColor3 = theme.ElementBackgroundHover,
+					Size = UDim2.new(0, controlWidth - 52, 0, 4),
+					LayoutOrder = 2,
+					Parent = controlHolder,
+				})
+				Round(track, 2)
+				local fill = New("Frame", { BackgroundColor3 = theme.Accent, Size = UDim2.new(0, 0, 1, 0), Parent = track })
+				Round(fill, 2)
+				local knob = New("Frame", {
+					BackgroundColor3 = theme.Text,
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.new(0, 0, 0.5, 0),
+					Size = UDim2.new(0, 11, 0, 11),
+					ZIndex = 2,
+					Parent = track,
+				})
+				Round(knob, 6)
+
+				local Slider = { Value = cfg.Default or min, Changed = Signal.new() }
+				local function ApplyRounding(v)
+					if rounding <= 0 then return math.floor(v + 0.5) end
+					local mult = 10 ^ rounding
+					return math.floor(v * mult + 0.5) / mult
+				end
+				local function RenderSlider(v)
+					v = math.clamp(v, min, max)
+					local alpha = (max ~= min) and (v - min) / (max - min) or 0
+					fill.Size = UDim2.new(alpha, 0, 1, 0)
+					knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+					valueLabel.Text = tostring(v) .. suffix
+				end
+				RenderSlider(Slider.Value)
+				function Slider:SetValue(v)
+					v = ApplyRounding(v)
+					Slider.Value = v
+					RenderSlider(v)
+					Slider.Changed:Fire(v)
+					if cfg.Callback then cfg.Callback(v) end
+				end
+				function Slider:OnChanged(fn) Slider.Changed:Connect(fn) end
+
+				local dragging = false
+				local function UpdateFromInputPos(x)
+					local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+					Slider:SetValue(min + rel * (max - min))
+				end
+				track.InputBegan:Connect(function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+						dragging = true
+						UpdateFromInputPos(input.Position.X)
+					end
+				end)
+				UserInputService.InputChanged:Connect(function(input)
+					if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+						UpdateFromInputPos(input.Position.X)
+					end
+				end)
+				UserInputService.InputEnded:Connect(function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+						dragging = false
+					end
+				end)
+
+				if id then NovaUI.Options[id] = Slider end
+				return Slider
+			end
+
+			--- Section:AddDropdown(id, { Title, Description, Values, Multi, Default, Elevated, Callback })
+			function Section:AddDropdown(id, cfg)
+				cfg = cfg or {}
+				local values = cfg.Values or {}
+				local multi = cfg.Multi or false
+				local controlWidth = 130
+
+				local _, controlHolder = CreateRow(cfg, controlWidth)
+
+				local ddBtn = New("TextButton", {
+					Text = "",
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.SubText,
+					BackgroundColor3 = theme.ElementBackgroundHover,
+					BackgroundTransparency = 0,
+					AutoButtonColor = false,
+					Size = UDim2.new(0, controlWidth, 0, 26),
+					LayoutOrder = 1,
+					Parent = controlHolder,
+				})
+				Round(ddBtn, 6)
+				Pad(ddBtn, 8, 0, 22, 0)
+				ddBtn.TextXAlignment = Enum.TextXAlignment.Left
+				ddBtn.TextTruncate = Enum.TextTruncate.AtEnd
+
+				do
+					local icon = GetIcon("chevron-down", 10)
+					if icon then
+						icon.AnchorPoint = Vector2.new(1, 0.5)
+						icon.Position = UDim2.new(1, -6, 0.5, 0)
+						icon.ImageColor3 = theme.SubText
+						icon.Parent = ddBtn
+					else
+						New("TextLabel", {
+							Text = "\226\150\190",
+							Font = Enum.Font.Gotham,
+							TextSize = 9,
+							TextColor3 = theme.SubText,
+							BackgroundTransparency = 1,
+							AnchorPoint = Vector2.new(1, 0.5),
+							Position = UDim2.new(1, -6, 0.5, 0),
+							Size = UDim2.new(0, 10, 1, 0),
+							Parent = ddBtn,
+						})
+					end
+				end
+
+				-- Fixed-width, fully opaque popup — rendered in Overlay so it's
+				-- never occluded by (or bleeding through) later sections/rows.
+				local listFrame = New("Frame", {
+					BackgroundColor3 = theme.PopupBackground,
+					BackgroundTransparency = 0,
+					Visible = false,
+					Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(#values, 6) * 28 + 8),
+					Parent = Overlay,
+				})
+				Round(listFrame, 6)
+				Stroke(listFrame, theme.Border, 1)
+				AddShadow(listFrame, { Transparency = 0.45, OffsetY = 6, Blur = 16 })
+
+				local listScroll = New("ScrollingFrame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 1, 0),
+					CanvasSize = UDim2.new(0, 0, 0, 0),
+					AutomaticCanvasSize = Enum.AutomaticSize.Y,
+					ScrollBarThickness = 2,
+					BorderSizePixel = 0,
+					Parent = listFrame,
+				})
+				Pad(listScroll, 4)
+				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = listScroll })
+
+				local Dropdown = { Value = multi and {} or nil, Changed = Signal.new(), _optionButtons = {} }
+				local function LabelForValue()
+					if multi then
+						local names = {}
+						for name, on in pairs(Dropdown.Value or {}) do
+							if on then table.insert(names, name) end
+						end
+						return #names > 0 and table.concat(names, ", ") or "..."
+					else
+						return tostring(Dropdown.Value or "...")
+					end
+				end
+				local function RefreshButton() ddBtn.Text = LabelForValue() end
+				local function RefreshHighlights()
+					for name, btn in pairs(Dropdown._optionButtons) do
+						local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
+						btn.BackgroundTransparency = active and 0.85 or 1
+						btn.TextColor3 = active and theme.Accent or theme.Text
+					end
+				end
+				function Dropdown:OnChanged(fn) Dropdown.Changed:Connect(fn) end
+				function Dropdown:SetValue(value)
+					if multi then
+						local map = {}
+						if typeof(value) == "table" then
+							if value[1] ~= nil then
+								for _, name in ipairs(value) do map[name] = true end
+							else
+								for name, on in pairs(value) do map[name] = on end
+							end
+						end
+						Dropdown.Value = map
+					else
+						Dropdown.Value = value
+					end
+					RefreshButton()
+					RefreshHighlights()
+					Dropdown.Changed:Fire(Dropdown.Value)
+					if cfg.Callback then cfg.Callback(Dropdown.Value) end
+				end
+				for i, name in ipairs(values) do
+					local optBtn = New("TextButton", {
+						Text = tostring(name),
 						Font = Enum.Font.Gotham,
 						TextSize = 12,
-						TextColor3 = theme.SubText,
-						TextXAlignment = Enum.TextXAlignment.Right,
+						TextColor3 = theme.Text,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						BackgroundColor3 = theme.Accent,
 						BackgroundTransparency = 1,
-						Size = UDim2.new(0, 44, 1, 0),
-						LayoutOrder = 2,
-						Parent = controlHolder,
+						AutoButtonColor = false,
+						Size = UDim2.new(1, 0, 0, 26),
+						LayoutOrder = i,
+						Parent = listScroll,
 					})
+					Round(optBtn, 4)
+					Pad(optBtn, 8, 0, 8, 0)
+					Dropdown._optionButtons[tostring(name)] = optBtn
+					optBtn.MouseEnter:Connect(function()
+						if not (multi and Dropdown.Value[tostring(name)]) and Dropdown.Value ~= tostring(name) then
+							Tween(optBtn, { BackgroundTransparency = 0.92 }, 0.08)
+						end
+					end)
+					optBtn.MouseLeave:Connect(function() RefreshHighlights() end)
+					optBtn.MouseButton1Click:Connect(function()
+						if multi then
+							local key = tostring(name)
+							local newMap = {}
+							for k, v in pairs(Dropdown.Value) do newMap[k] = v end
+							newMap[key] = not newMap[key]
+							Dropdown:SetValue(newMap)
+						else
+							Dropdown:SetValue(tostring(name))
+							ClosePopup()
+						end
+					end)
+				end
+				ddBtn.MouseButton1Click:Connect(function()
+					OpenPopup(listFrame, ddBtn, { Align = "right" })
+				end)
+				if cfg.Default ~= nil then
+					Dropdown:SetValue(cfg.Default)
+				else
+					RefreshButton()
+				end
 
-					local trackWidth = (rowCfg.Menu and (rightControlWidth - 24) or rightControlWidth) - 52
-					local track = New("Frame", {
-						BackgroundColor3 = theme.ElementBackgroundHover,
-						Size = UDim2.new(0, math.max(trackWidth, 50), 0, 4),
+				if id then NovaUI.Options[id] = Dropdown end
+				return Dropdown
+			end
+
+			--- Section:AddColorpicker(id, { Title, Description, Default, Transparency, Elevated })
+			function Section:AddColorpicker(id, cfg)
+				cfg = cfg or {}
+				local controlWidth = 34
+
+				local _, controlHolder = CreateRow(cfg, controlWidth)
+
+				local swatch = New("TextButton", {
+					Text = "",
+					BackgroundColor3 = cfg.Default or Color3.fromRGB(255, 255, 255),
+					AutoButtonColor = false,
+					Size = UDim2.new(0, 30, 0, 20),
+					Parent = controlHolder,
+				})
+				Round(swatch, 5)
+				Stroke(swatch, theme.Border, 1)
+
+				-- Fixed-size, fully opaque popup rendered in Overlay so it's
+				-- always readable and never sits under other UI.
+				local popup = New("Frame", {
+					BackgroundColor3 = theme.PopupBackground,
+					BackgroundTransparency = 0,
+					Visible = false,
+					Size = UDim2.new(0, 200, 0, cfg.Transparency ~= nil and 210 or 180),
+					Parent = Overlay,
+				})
+				Round(popup, 8)
+				Stroke(popup, theme.Border, 1)
+				AddShadow(popup, { Transparency = 0.45, OffsetY = 6, Blur = 16 })
+				Pad(popup, 10)
+				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = popup })
+
+				-- Live preview swatch inside the popup, so the current color
+				-- is always visible right next to the pickers themselves.
+				local previewRow = New("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, 20),
+					LayoutOrder = 0,
+					Parent = popup,
+				})
+				local previewSwatch = New("Frame", {
+					BackgroundColor3 = cfg.Default or Color3.fromRGB(255, 255, 255),
+					Size = UDim2.new(0, 20, 0, 20),
+					Parent = previewRow,
+				})
+				Round(previewSwatch, 5)
+				Stroke(previewSwatch, theme.Border, 1)
+				local previewLabel = New("TextLabel", {
+					Text = "",
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					BackgroundTransparency = 1,
+					Position = UDim2.new(0, 28, 0, 0),
+					Size = UDim2.new(1, -28, 1, 0),
+					Parent = previewRow,
+				})
+
+				local svBox = New("Frame", {
+					BackgroundColor3 = Color3.fromRGB(255, 0, 0),
+					Size = UDim2.new(1, 0, 0, 100),
+					LayoutOrder = 1,
+					Parent = popup,
+				})
+				Round(svBox, 4)
+				New("UIGradient", { Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(1, 1, 1)), Transparency = NumberSequence.new(0, 1), Parent = svBox })
+				local blackOverlay = New("Frame", { BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = svBox })
+				New("UIGradient", { Color = ColorSequence.new(Color3.new(0, 0, 0), Color3.new(0, 0, 0)), Transparency = NumberSequence.new(1, 0), Rotation = 90, Parent = blackOverlay })
+
+				local svCursor = New("Frame", {
+					BackgroundColor3 = Color3.new(1, 1, 1),
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Size = UDim2.new(0, 10, 0, 10),
+					ZIndex = 2,
+					Parent = svBox,
+				})
+				Round(svCursor, 5)
+				Stroke(svCursor, Color3.new(0, 0, 0), 2)
+
+				local hueBar = New("Frame", {
+					Size = UDim2.new(1, 0, 0, 14),
+					LayoutOrder = 2,
+					Parent = popup,
+				})
+				Round(hueBar, 4)
+				New("UIGradient", {
+					Color = ColorSequence.new({
+						ColorSequenceKeypoint.new(0.00, Color3.fromHSV(0, 1, 1)),
+						ColorSequenceKeypoint.new(0.17, Color3.fromHSV(1 / 6, 1, 1)),
+						ColorSequenceKeypoint.new(0.33, Color3.fromHSV(2 / 6, 1, 1)),
+						ColorSequenceKeypoint.new(0.50, Color3.fromHSV(3 / 6, 1, 1)),
+						ColorSequenceKeypoint.new(0.67, Color3.fromHSV(4 / 6, 1, 1)),
+						ColorSequenceKeypoint.new(0.83, Color3.fromHSV(5 / 6, 1, 1)),
+						ColorSequenceKeypoint.new(1.00, Color3.fromHSV(1, 1, 1)),
+					}),
+					Parent = hueBar,
+				})
+				local hueCursor = New("Frame", {
+					BackgroundColor3 = Color3.new(1, 1, 1),
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.new(0, 0, 0.5, 0),
+					Size = UDim2.new(0, 4, 1, 4),
+					ZIndex = 2,
+					Parent = hueBar,
+				})
+				Stroke(hueCursor, Color3.new(0, 0, 0), 1)
+
+				local alphaBar, alphaCursor
+				if cfg.Transparency ~= nil then
+					alphaBar = New("Frame", {
+						BackgroundColor3 = theme.ElementBackground,
+						Size = UDim2.new(1, 0, 0, 14),
 						LayoutOrder = 3,
-						Parent = controlHolder,
+						Parent = popup,
 					})
-					Round(track, 2)
-					local fill = New("Frame", { BackgroundColor3 = theme.Accent, Size = UDim2.new(0, 0, 1, 0), Parent = track })
-					Round(fill, 2)
-					local knob = New("Frame", {
-						BackgroundColor3 = theme.Text,
+					Round(alphaBar, 4)
+					alphaCursor = New("Frame", {
+						BackgroundColor3 = Color3.new(1, 1, 1),
 						AnchorPoint = Vector2.new(0.5, 0.5),
 						Position = UDim2.new(0, 0, 0.5, 0),
-						Size = UDim2.new(0, 11, 0, 11),
+						Size = UDim2.new(0, 4, 1, 4),
 						ZIndex = 2,
-						Parent = track,
+						Parent = alphaBar,
 					})
-					Round(knob, 6)
-
-					local Slider = { Value = rowCfg.Default or min, Changed = Signal.new() }
-					local function ApplyRounding(v)
-						if rounding <= 0 then return math.floor(v + 0.5) end
-						local mult = 10 ^ rounding
-						return math.floor(v * mult + 0.5) / mult
-					end
-					local function RenderSlider(v)
-						v = math.clamp(v, min, max)
-						local alpha = (max ~= min) and (v - min) / (max - min) or 0
-						fill.Size = UDim2.new(alpha, 0, 1, 0)
-						knob.Position = UDim2.new(alpha, 0, 0.5, 0)
-						valueLabel.Text = tostring(v) .. suffix
-					end
-					RenderSlider(Slider.Value)
-					function Slider:SetValue(v)
-						v = ApplyRounding(v)
-						Slider.Value = v
-						RenderSlider(v)
-						Slider.Changed:Fire(v)
-						if rowCfg.Callback then rowCfg.Callback(v) end
-					end
-					function Slider:OnChanged(fn) Slider.Changed:Connect(fn) end
-
-					local dragging = false
-					local function UpdateFromInputPos(x)
-						local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-						Slider:SetValue(min + rel * (max - min))
-					end
-					track.InputBegan:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-							dragging = true
-							UpdateFromInputPos(input.Position.X)
-						end
-					end)
-					UserInputService.InputChanged:Connect(function(input)
-						if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-							UpdateFromInputPos(input.Position.X)
-						end
-					end)
-					UserInputService.InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-							dragging = false
-						end
-					end)
-
-					if id then NovaUI.Options[id] = Slider end
-					return Slider
-
-				elseif rowType == "text" then
-					New("TextLabel", {
-						Text = rowCfg.Value or "",
-						Font = Enum.Font.Gotham,
-						TextSize = 12,
-						TextColor3 = theme.SubText,
-						TextXAlignment = Enum.TextXAlignment.Right,
-						BackgroundTransparency = 1,
-						LayoutOrder = 2,
-						Size = UDim2.new(0, rightControlWidth, 1, 0),
-						Parent = controlHolder,
-					})
-					return nil
+					Stroke(alphaCursor, Color3.new(0, 0, 0), 1)
 				end
+
+				local Colorpicker = {
+					Value = cfg.Default or Color3.fromRGB(255, 255, 255),
+					Transparency = cfg.Transparency or 0,
+					Changed = Signal.new(),
+				}
+				local h, s, v = Color3.toHSV(Colorpicker.Value)
+
+				local function Render()
+					svBox.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
+					svCursor.Position = UDim2.new(s, 0, 1 - v, 0)
+					hueCursor.Position = UDim2.new(h, 0, 0.5, 0)
+					swatch.BackgroundColor3 = Colorpicker.Value
+					previewSwatch.BackgroundColor3 = Colorpicker.Value
+					previewLabel.Text = string.format("%d, %d, %d", math.round(Colorpicker.Value.R * 255), math.round(Colorpicker.Value.G * 255), math.round(Colorpicker.Value.B * 255))
+					if alphaCursor then
+						alphaCursor.Position = UDim2.new(1 - Colorpicker.Transparency, 0, 0.5, 0)
+						alphaBar.BackgroundColor3 = Colorpicker.Value
+					end
+				end
+				Render()
+
+				function Colorpicker:OnChanged(fn) Colorpicker.Changed:Connect(fn) end
+				function Colorpicker:SetValueRGB(color)
+					Colorpicker.Value = color
+					h, s, v = Color3.toHSV(color)
+					Render()
+					Colorpicker.Changed:Fire()
+				end
+
+				local function Commit()
+					Colorpicker.Value = Color3.fromHSV(h, s, v)
+					Render()
+					Colorpicker.Changed:Fire()
+				end
+
+				local draggingSV, draggingHue, draggingAlpha = false, false, false
+				svBox.InputBegan:Connect(function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 then
+						draggingSV = true
+						s = math.clamp((input.Position.X - svBox.AbsolutePosition.X) / svBox.AbsoluteSize.X, 0, 1)
+						v = 1 - math.clamp((input.Position.Y - svBox.AbsolutePosition.Y) / svBox.AbsoluteSize.Y, 0, 1)
+						Commit()
+					end
+				end)
+				hueBar.InputBegan:Connect(function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 then
+						draggingHue = true
+						h = math.clamp((input.Position.X - hueBar.AbsolutePosition.X) / hueBar.AbsoluteSize.X, 0, 1)
+						Commit()
+					end
+				end)
+				if alphaBar then
+					alphaBar.InputBegan:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseButton1 then
+							draggingAlpha = true
+							Colorpicker.Transparency = 1 - math.clamp((input.Position.X - alphaBar.AbsolutePosition.X) / alphaBar.AbsoluteSize.X, 0, 1)
+							Render()
+							Colorpicker.Changed:Fire()
+						end
+					end)
+				end
+				UserInputService.InputEnded:Connect(function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 then
+						draggingSV, draggingHue, draggingAlpha = false, false, false
+					end
+				end)
+				UserInputService.InputChanged:Connect(function(input)
+					if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+					if draggingSV then
+						s = math.clamp((input.Position.X - svBox.AbsolutePosition.X) / svBox.AbsoluteSize.X, 0, 1)
+						v = 1 - math.clamp((input.Position.Y - svBox.AbsolutePosition.Y) / svBox.AbsoluteSize.Y, 0, 1)
+						Commit()
+					elseif draggingHue then
+						h = math.clamp((input.Position.X - hueBar.AbsolutePosition.X) / hueBar.AbsoluteSize.X, 0, 1)
+						Commit()
+					elseif draggingAlpha and alphaBar then
+						Colorpicker.Transparency = 1 - math.clamp((input.Position.X - alphaBar.AbsolutePosition.X) / alphaBar.AbsoluteSize.X, 0, 1)
+						Render()
+						Colorpicker.Changed:Fire()
+					end
+				end)
+
+				swatch.MouseButton1Click:Connect(function()
+					-- Re-sync h/s/v from the *current* Value every time the
+					-- popup opens (in case SetValueRGB changed it while
+					-- closed) so the cursors always match the real color.
+					h, s, v = Color3.toHSV(Colorpicker.Value)
+					Render()
+					OpenPopup(popup, swatch, { Align = "right" })
+				end)
+
+				if id then NovaUI.Options[id] = Colorpicker end
+				return Colorpicker
+			end
+
+			--- Section:AddKeybind(id, { Title, Description, Mode, Default, Elevated, Callback, ChangedCallback })
+			function Section:AddKeybind(id, cfg)
+				cfg = cfg or {}
+				local controlWidth = 90
+
+				local _, controlHolder = CreateRow(cfg, controlWidth)
+
+				local keyBtn = New("TextButton", {
+					Text = tostring(cfg.Default or "None"),
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.Text,
+					BackgroundColor3 = theme.ElementBackgroundHover,
+					Size = UDim2.new(0, controlWidth, 0, 26),
+					Parent = controlHolder,
+				})
+				Round(keyBtn, 6)
+
+				local Keybind = {
+					Value = cfg.Default,
+					Mode = cfg.Mode or "Toggle",
+					Changed = Signal.new(),
+					Click = Signal.new(),
+					_state = false,
+					_listening = false,
+				}
+
+				function Keybind:OnChanged(fn) Keybind.Changed:Connect(fn) end
+				function Keybind:OnClick(fn) Keybind.Click:Connect(fn) end
+				function Keybind:GetState() return Keybind._state end
+				function Keybind:SetValue(key, mode)
+					Keybind.Value = key
+					if mode then Keybind.Mode = mode end
+					keyBtn.Text = tostring(key or "None")
+					Keybind.Changed:Fire(key)
+					if cfg.ChangedCallback then cfg.ChangedCallback(key) end
+				end
+
+				keyBtn.MouseButton1Click:Connect(function()
+					Keybind._listening = true
+					keyBtn.Text = "..."
+				end)
+
+				UserInputService.InputBegan:Connect(function(input, processed)
+					if Keybind._listening then
+						local keyName
+						if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
+						elseif input.UserInputType == Enum.UserInputType.MouseButton2 then keyName = "MB2"
+						elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
+						if keyName then
+							Keybind._listening = false
+							Keybind:SetValue(keyName)
+						end
+						return
+					end
+
+					if processed then return end
+					local matches = (input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode.Name == Keybind.Value)
+						or (input.UserInputType == Enum.UserInputType.MouseButton1 and Keybind.Value == "MB1")
+						or (input.UserInputType == Enum.UserInputType.MouseButton2 and Keybind.Value == "MB2")
+
+					if matches then
+						if Keybind.Mode == "Toggle" then
+							Keybind._state = not Keybind._state
+							if Keybind._state then
+								Keybind.Click:Fire()
+								if cfg.Callback then cfg.Callback(true) end
+							else
+								if cfg.Callback then cfg.Callback(false) end
+							end
+						elseif Keybind.Mode == "Hold" then
+							Keybind._state = true
+							if cfg.Callback then cfg.Callback(true) end
+						elseif Keybind.Mode == "Always" then
+							if cfg.Callback then cfg.Callback(true) end
+						end
+					end
+				end)
+
+				UserInputService.InputEnded:Connect(function(input)
+					if Keybind.Mode ~= "Hold" then return end
+					local keyName
+					if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
+					elseif input.UserInputType == Enum.UserInputType.MouseButton2 then keyName = "MB2"
+					elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
+					if keyName == Keybind.Value then
+						Keybind._state = false
+						if cfg.Callback then cfg.Callback(false) end
+					end
+				end)
+
+				if id then NovaUI.Options[id] = Keybind end
+				return Keybind
+			end
+
+			--- Section:AddInput(id, { Title, Description, Default, Placeholder, Numeric, Finished, Elevated, Callback })
+			function Section:AddInput(id, cfg)
+				cfg = cfg or {}
+				local controlWidth = 120
+
+				local _, controlHolder = CreateRow(cfg, controlWidth)
+
+				local box = New("Frame", {
+					BackgroundColor3 = theme.ElementBackgroundHover,
+					Size = UDim2.new(0, controlWidth, 0, 26),
+					Parent = controlHolder,
+				})
+				Round(box, 6)
+				Pad(box, 8, 0, 8, 0)
+
+				local textbox = New("TextBox", {
+					Text = cfg.Default or "",
+					PlaceholderText = cfg.Placeholder or "",
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.Text,
+					PlaceholderColor3 = theme.SubText,
+					ClearTextOnFocus = false,
+					BackgroundTransparency = 1,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					Size = UDim2.new(1, 0, 1, 0),
+					Parent = box,
+				})
+
+				local Input = { Value = cfg.Default or "", Changed = Signal.new() }
+				function Input:OnChanged(fn) Input.Changed:Connect(fn) end
+				function Input:SetValue(text)
+					Input.Value = text
+					textbox.Text = text
+					Input.Changed:Fire(text)
+				end
+
+				if cfg.Numeric then
+					textbox:GetPropertyChangedSignal("Text"):Connect(function()
+						local filtered = textbox.Text:gsub("[^%d%.%-]", "")
+						if filtered ~= textbox.Text then
+							textbox.Text = filtered
+						end
+					end)
+				end
+
+				local function Fire()
+					Input.Value = textbox.Text
+					Input.Changed:Fire(textbox.Text)
+					if cfg.Callback then cfg.Callback(textbox.Text) end
+				end
+
+				if cfg.Finished then
+					textbox.FocusLost:Connect(function(enterPressed)
+						if enterPressed then Fire() end
+					end)
+				else
+					textbox:GetPropertyChangedSignal("Text"):Connect(Fire)
+				end
+
+				if id then NovaUI.Options[id] = Input end
+				return Input
+			end
+
+			--- Section:AddButton({ Title, Description, ButtonText, Elevated, Callback })
+			function Section:AddButton(cfg)
+				cfg = cfg or {}
+				local controlWidth = 74
+
+				local _, controlHolder = CreateRow(cfg, controlWidth)
+
+				local btn = New("TextButton", {
+					Text = cfg.ButtonText or "Run",
+					Font = Enum.Font.GothamMedium,
+					TextSize = 12,
+					TextColor3 = Color3.new(1, 1, 1),
+					BackgroundColor3 = theme.Accent,
+					AutoButtonColor = false,
+					Size = UDim2.new(0, controlWidth, 0, 26),
+					Parent = controlHolder,
+				})
+				Round(btn, 6)
+				AddHoverScale(btn, 1.04)
+				btn.MouseButton1Click:Connect(function()
+					if cfg.Callback then cfg.Callback() end
+				end)
+				return { Instance = btn }
+			end
+
+			--- Section:AddParagraph({ Title, Content })
+			function Section:AddParagraph(cfg)
+				cfg = cfg or {}
+				Section._rowCount = Section._rowCount + 1
+				local card = New("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					LayoutOrder = Section._rowCount,
+					Parent = sectionFrame,
+				})
+				Pad(card, 4, 6, 4, 6)
+				FadeSlideIn(card, math.min(Section._rowCount * 0.012, 0.1))
+				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3), Parent = card })
+				if cfg.Title then
+					New("TextLabel", {
+						Text = cfg.Title,
+						Font = Enum.Font.GothamMedium,
+						TextSize = 13,
+						TextColor3 = theme.Text,
+						TextXAlignment = Enum.TextXAlignment.Left,
+						BackgroundTransparency = 1,
+						Size = UDim2.new(1, 0, 0, 16),
+						LayoutOrder = 1,
+						Parent = card,
+					})
+				end
+				New("TextLabel", {
+					Text = cfg.Content or "",
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextWrapped = true,
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					LayoutOrder = 2,
+					Parent = card,
+				})
+				return { Instance = card }
 			end
 
 			return Section
 		end
 
-		self._tabs[index] = Tab
+		self._tabs[tabIndex] = Tab
 		return Tab
 	end
 
