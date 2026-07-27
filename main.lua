@@ -20,13 +20,18 @@
 	ReplicatedStorage returning the same shape and it's found automatically):
 
 		{
-			["48px"]  = { rewind = {123456789, {48, 48}}, ... },
-			["256px"] = { rewind = {987654321, {256, 256}}, ... },
+			["48px"]  = { rewind = {16898613699, {48, 48}, {563, 967}}, ... },
+			["256px"] = { rewind = {16898613699, {256, 256}, {0, 0}}, ... },
 		}
 
-	i.e. size-bucket key -> icon name -> {assetId, {pxWidth, pxHeight}}. Any
-	number of size buckets works; GetIcon picks the smallest bucket that's
-	still big enough for the requested render size and scales it down
+	i.e. size-bucket key -> icon name -> {assetId, {pxWidth, pxHeight}, {offsetX, offsetY}}.
+	assetId is one shared sprite-sheet image per bucket; {pxWidth, pxHeight}
+	is this icon's size within that sheet, and {offsetX, offsetY} is where
+	it sits inside the sheet (rendered via ImageRectOffset/ImageRectSize).
+	The offset is optional — omit it (or use {0,0}) if assetId is instead a
+	one-icon-per-decal id rather than a packed sheet. Any number of size
+	buckets works; GetIcon picks the smallest bucket that's still big enough
+	for the requested render size and scales it down
 	(preserving aspect ratio), so keep at least one reasonably large bucket
 	per icon. Tab icons, chrome icons (search, folder, chevron, minimize,
 	fullscreen, close, notification close), and the bottom-of-sidebar
@@ -49,6 +54,7 @@ local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -130,30 +136,38 @@ local function Tween(inst, props, time, style, dir)
 	return tw
 end
 
+-- IMPORTANT: the movement/end tracking below is on the GLOBAL
+-- UserInputService, not on `handle`. A GuiObject's own InputChanged only
+-- fires while the cursor is still over that object's bounds — during an
+-- actual drag the cursor leaves the (usually small) handle almost
+-- immediately, which silently stops the drag. Only InputBegan (to detect
+-- the press starting on the handle) needs to be scoped to `handle`.
 local function MakeDraggable(frame, handle)
 	handle = handle or frame
-	local dragging, dragStart, startPos = false, nil, nil
+	local dragging = false
+	local dragStart, startPos
 
 	handle.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			dragStart = input.Position
 			startPos = frame.Position
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
-			end)
 		end
 	end)
 
-	handle.InputChanged:Connect(function(input)
+	UserInputService.InputChanged:Connect(function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
 			frame.Position = UDim2.new(
 				startPos.X.Scale, startPos.X.Offset + delta.X,
 				startPos.Y.Scale, startPos.Y.Offset + delta.Y
 			)
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
 		end
 	end)
 end
@@ -253,9 +267,75 @@ NovaUI.Unloaded = false
 NovaUI.Theme = Themes.Dark
 NovaUI.Icons = nil
 
+--=============================================================================
+-- CONFIG SERIALIZATION (JSON) — Color3 values are stored as a tagged
+-- {__type="Color3", R=, G=, B=} table since raw Color3 isn't JSON-safe.
+--=============================================================================
+
+local function SerializeValue(value)
+	if typeof(value) == "Color3" then
+		return { __type = "Color3", R = value.R, G = value.G, B = value.B }
+	end
+	return value
+end
+
+local function DeserializeValue(value)
+	if typeof(value) == "table" and value.__type == "Color3" then
+		return Color3.new(value.R or 0, value.G or 0, value.B or 0)
+	end
+	return value
+end
+
+--- NovaUI:ExportConfig() -> table mapping every registered option id to its
+--- current (JSON-safe) value. Colorpicker values come back as
+--- {__type="Color3", R,G,B} rather than a raw Color3.
+function NovaUI:ExportConfig()
+	local data = {}
+	for id, opt in pairs(NovaUI.Options) do
+		data[id] = SerializeValue(opt.Value)
+	end
+	return data
+end
+
+--- NovaUI:ExportConfigJSON() -> JSON string of NovaUI:ExportConfig().
+function NovaUI:ExportConfigJSON()
+	return HttpService:JSONEncode(NovaUI:ExportConfig())
+end
+
+--- NovaUI:ApplyConfig(data) — data may be a Lua table (id -> value, as
+--- produced by ExportConfig) or a JSON string. Pushes each value into the
+--- matching live option via its :SetValue/:SetValueRGB method, so every
+--- toggle/slider/dropdown/colorpicker/keybind/input on screen updates.
+function NovaUI:ApplyConfig(data)
+	if type(data) == "string" then
+		local ok, decoded = pcall(function() return HttpService:JSONDecode(data) end)
+		if not ok or type(decoded) ~= "table" then return false end
+		data = decoded
+	end
+	if type(data) ~= "table" then return false end
+
+	for id, rawValue in pairs(data) do
+		local opt = NovaUI.Options[id]
+		if opt then
+			local value = DeserializeValue(rawValue)
+			if typeof(value) == "Color3" and opt.SetValueRGB then
+				opt:SetValueRGB(value)
+			elseif opt.SetValue then
+				opt:SetValue(value)
+			end
+		end
+	end
+	return true
+end
+
 --- Provide your own icon asset table (no external module dependency).
---- Shape: { ["48px"] = { iconname = {assetId, {pxWidth, pxHeight}}, ... },
----          ["256px"] = { iconname = {assetId, {pxWidth, pxHeight}}, ... } }
+--- Each bucket's assetId is one sprite-sheet image shared by every icon in
+--- that bucket; {w,h} is the icon's size within the sheet and the optional
+--- {x,y} is its top-left offset inside the sheet (ImageRectSize/Offset).
+--- Omit {x,y} (or use {0,0}) if assetId is instead a dedicated per-icon
+--- decal rather than a sheet.
+--- Shape: { ["48px"] = { iconname = {assetId, {pxWidth, pxHeight}, {offsetX, offsetY}}, ... },
+---          ["256px"] = { iconname = {assetId, {pxWidth, pxHeight}, {offsetX, offsetY}}, ... } }
 --- Any number of size buckets is fine — keys just need a number in them
 --- (e.g. "48px", "256", "64x64"). GetIcon picks the smallest bucket that's
 --- still >= the requested render size (falling back to the largest bucket
@@ -309,7 +389,7 @@ local function GetIcon(name, size, propsOverrides)
 	local entry = bucket and bucket[name]
 	if not entry then return nil end
 
-	local assetId, dims = entry[1], entry[2]
+	local assetId, dims, offset = entry[1], entry[2], entry[3]
 	if not assetId then return nil end
 	local nativeW = (dims and dims[1]) or size or 20
 	local nativeH = (dims and dims[2]) or size or 20
@@ -317,11 +397,19 @@ local function GetIcon(name, size, propsOverrides)
 	local scale = target / math.max(nativeW, nativeH)
 
 	local ok, label = pcall(function()
-		return New("ImageLabel", {
+		local props = {
 			Image = "rbxassetid://" .. tostring(assetId),
 			BackgroundTransparency = 1,
 			Size = UDim2.fromOffset(math.floor(nativeW * scale + 0.5), math.floor(nativeH * scale + 0.5)),
-		})
+		}
+		-- If the table gives an {x,y} sheet offset, assetId is a shared
+		-- sprite sheet — carve out just this icon's sub-rectangle instead of
+		-- rendering the whole sheet image.
+		if offset then
+			props.ImageRectOffset = Vector2.new(offset[1] or 0, offset[2] or 0)
+			props.ImageRectSize = Vector2.new(nativeW, nativeH)
+		end
+		return New("ImageLabel", props)
 	end)
 	if not ok or not label then return nil end
 
@@ -682,18 +770,31 @@ function NovaUI:CreateWindow(config)
 	})
 
 	local currentPopup = nil
+	local currentPopupOnClose = nil
 	local function ClosePopup()
 		if currentPopup then
 			currentPopup.Visible = false
 			currentPopup = nil
 		end
 		PopupCatcher.Visible = false
+		if currentPopupOnClose then
+			local onClose = currentPopupOnClose
+			currentPopupOnClose = nil
+			onClose()
+		end
 	end
 	PopupCatcher.MouseButton1Click:Connect(ClosePopup)
 
-	--- Opens `popup` (reparented into Overlay) anchored just below/aligned
-	--- to `anchorButton`. opts.Align = "left" (default) or "right".
+	--- Opens `popup` (reparented into Overlay) anchored just below
+	--- `anchorButton`. opts.Align = "left" (default) or "right" is only a
+	--- *preference* — if the preferred side would overflow/underflow the
+	--- screen (e.g. a swatch near the left edge with Align="right"), this
+	--- automatically falls back to whichever side actually fits, instead of
+	--- hard-clamping to the screen edge and stranding the popup far from
+	--- the button that opened it.
 	--- opts.Gap = pixel gap below the anchor (default 6).
+	--- opts.OnClose = fn() called once, when this popup is closed (either
+	--- by clicking an option, or by clicking outside it).
 	local function OpenPopup(popup, anchorButton, opts)
 		opts = opts or {}
 		if currentPopup == popup then
@@ -709,9 +810,23 @@ function NovaUI:CreateWindow(config)
 		local popupWidth = popup.Size.X.Offset
 		local screenSize = Overlay.AbsoluteSize
 
-		local x = anchorPos.X
-		if opts.Align == "right" then
-			x = anchorPos.X + anchorSize.X - popupWidth
+		local leftAlignedX = anchorPos.X
+		local rightAlignedX = anchorPos.X + anchorSize.X - popupWidth
+		local leftFits = (leftAlignedX + popupWidth) <= screenSize.X
+		local rightFits = rightAlignedX >= 0
+		local preferRight = opts.Align == "right"
+
+		local x
+		if preferRight and rightFits then
+			x = rightAlignedX
+		elseif (not preferRight) and leftFits then
+			x = leftAlignedX
+		elseif rightFits then
+			x = rightAlignedX
+		elseif leftFits then
+			x = leftAlignedX
+		else
+			x = preferRight and rightAlignedX or leftAlignedX
 		end
 		x = math.clamp(x, 4, math.max(4, screenSize.X - popupWidth - 4))
 
@@ -721,6 +836,7 @@ function NovaUI:CreateWindow(config)
 		PopupCatcher.Visible = true
 
 		currentPopup = popup
+		currentPopupOnClose = opts.OnClose
 	end
 
 	--=========================================================================
@@ -834,10 +950,11 @@ function NovaUI:CreateWindow(config)
 		Parent = TopBarRow,
 	})
 
-	-- Search pill
+	-- Search pill (narrower than before — the save-config button added
+	-- next to the selector needs the room in the top bar).
 	local SearchPill = New("Frame", {
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 220, 1, 0),
+		Size = UDim2.new(0, 170, 1, 0),
 		LayoutOrder = 1,
 		Parent = TopBarRow,
 	})
@@ -905,7 +1022,7 @@ function NovaUI:CreateWindow(config)
 		Parent = SelectorPill,
 	})
 	do
-		local icon = GetIcon("folder", 14)
+		local icon = GetIcon("file-cog", 14)
 		if icon then
 			icon.LayoutOrder = 1
 			icon.ImageColor3 = theme.SubText
@@ -970,13 +1087,38 @@ function NovaUI:CreateWindow(config)
 	Pad(SelectorList, 4)
 	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorList })
 
+	-- Save-config button, right next to the selector pill. Fires
+	-- Window.ConfigSelector:OnSave(fn) — hook up your own SaveManager-style
+	-- persistence logic there.
+	local SaveConfigBtn = New("TextButton", {
+		Text = "",
+		BackgroundColor3 = theme.ElementBackground,
+		Size = UDim2.new(0, 36, 1, 0),
+		AutoButtonColor = false,
+		LayoutOrder = 3,
+		ZIndex = 2,
+		Parent = TopBarRow,
+	})
+	Round(SaveConfigBtn, 8)
+	local saveIconHandle = SetButtonIcon(SaveConfigBtn, "save", "\226\134\147", 14, theme.SubText)
+	AddHoverScale(SaveConfigBtn, 1.06)
+	SaveConfigBtn.MouseEnter:Connect(function()
+		Tween(SaveConfigBtn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+		saveIconHandle.SetColor(theme.Text)
+	end)
+	SaveConfigBtn.MouseLeave:Connect(function()
+		Tween(SaveConfigBtn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
+		saveIconHandle.SetColor(theme.SubText)
+	end)
+	AttachTooltip(SaveConfigBtn, "Save Config")
+
 	-- Window chrome (minimize/fullscreen/close) — small, top-right corner.
 	-- All three render as real icons via MakeIconButton, falling back
 	-- to text glyphs automatically if no icon provider is hooked up.
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, 82, 1, 0),
-		LayoutOrder = 3,
+		LayoutOrder = 4,
 		ZIndex = 2,
 		Parent = TopBarRow,
 	})
@@ -989,11 +1131,11 @@ function NovaUI:CreateWindow(config)
 		Parent = ChromeRow,
 	})
 
-	local MinimizeBtn = MakeIconButton(ChromeRow, 24, "minus", "\226\128\148", 13)
+	local MinimizeBtn = MakeIconButton(ChromeRow, 24, "minimize-2", "\226\128\148", 13)
 	MinimizeBtn.Instance.LayoutOrder = 1
 	AttachTooltip(MinimizeBtn.Instance, "Minimize")
 
-	local FullscreenBtn = MakeIconButton(ChromeRow, 24, "maximize", "\226\150\162", 13)
+	local FullscreenBtn = MakeIconButton(ChromeRow, 24, "expand", "\226\150\162", 13)
 	FullscreenBtn.Instance.LayoutOrder = 2
 	AttachTooltip(FullscreenBtn.Instance, "Fullscreen")
 
@@ -1025,6 +1167,8 @@ function NovaUI:CreateWindow(config)
 	Window._minimized = false
 	Window._fullscreen = false
 	Window._fullSize = size
+	Window._viewportConn = nil
+	Window._cameraConn = nil
 	Window._activeTabIndex = 1
 	Window._searchRows = {} -- { {Instance, TitleLower, TabIndex}, ... }
 	Window._searchText = ""
@@ -1041,33 +1185,82 @@ function NovaUI:CreateWindow(config)
 		Window:ToggleFullscreen()
 	end)
 
+	--- Minimizing only collapses the sidebar + page content — the top bar
+	--- (search, config selector, save button, minimize/fullscreen/close) stays
+	--- visible and usable the whole time, it just fills the collapsed window.
 	function Window:ToggleMinimize()
 		self._minimized = not self._minimized
 		if self._minimized then
 			self._preMinimizeSize = Main.Size
-			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 56) }, 0.18, EASE_SOFT)
+			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, topBarHeight) }, 0.18, EASE_SOFT)
 			Sidebar.Visible = false
-			ContentArea.Visible = false
+			PagesContainer.Visible = false
+			Tween(ContentArea, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 1, 0) }, 0.18, EASE_SOFT)
 		else
 			Sidebar.Visible = true
-			ContentArea.Visible = true
+			PagesContainer.Visible = true
+			Tween(ContentArea, { Position = UDim2.new(0, railWidth, 0, 0), Size = UDim2.new(1, -railWidth, 1, 0) }, 0.18, EASE_SOFT)
 			Tween(Main, { Size = self._preMinimizeSize or self._fullSize }, 0.18, EASE_SOFT)
 		end
 	end
 
-	--- Toggles the window to fill (most of) the screen and back. Swaps the
-	--- chrome icon between "maximize" and "minimize-2".
+	-- Applies the current camera viewport to Main while fullscreen is on.
+	-- `animate` tweens the very first application; live updates afterward
+	-- (screen/resolution changes while already fullscreen) snap instantly so
+	-- they can't fight an in-flight tween.
+	local function ApplyViewportSize(window, animate)
+		local camera = Workspace.CurrentCamera
+		local viewport = (camera and camera.ViewportSize) or Vector2.new(1280, 720)
+		local targetSize = UDim2.fromOffset(viewport.X - 32, viewport.Y - 32)
+		if animate then
+			Tween(Main, { Size = targetSize }, 0.2, EASE_SOFT)
+		else
+			Main.Size = targetSize
+		end
+	end
+
+	local function DisconnectFullscreenTracking(window)
+		if window._viewportConn then
+			window._viewportConn:Disconnect()
+			window._viewportConn = nil
+		end
+		if window._cameraConn then
+			window._cameraConn:Disconnect()
+			window._cameraConn = nil
+		end
+	end
+
+	--- Toggles the window to fill (most of) the screen and back, tracking the
+	--- camera's ViewportSize live so Main is resized whenever the game
+	--- window/resolution changes while fullscreen is active. Swaps the chrome
+	--- icon between "expand" and "shrink".
 	function Window:ToggleFullscreen()
 		self._fullscreen = not self._fullscreen
 		if self._fullscreen then
 			self._savedSize = Main.Size
-			local camera = Workspace.CurrentCamera
-			local viewport = (camera and camera.ViewportSize) or Vector2.new(1280, 720)
-			Tween(Main, { Size = UDim2.fromOffset(viewport.X - 32, viewport.Y - 32) }, 0.2, EASE_SOFT)
-			FullscreenBtn.SetIcon("minimize-2", "\226\150\163")
+			ApplyViewportSize(self, true)
+
+			local function HookCamera(camera)
+				if not camera then return end
+				self._viewportConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+					ApplyViewportSize(self, false)
+				end)
+			end
+			HookCamera(Workspace.CurrentCamera)
+			self._cameraConn = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+				if self._viewportConn then
+					self._viewportConn:Disconnect()
+					self._viewportConn = nil
+				end
+				HookCamera(Workspace.CurrentCamera)
+				ApplyViewportSize(self, false)
+			end)
+
+			FullscreenBtn.SetIcon("shrink", "\226\150\163")
 		else
+			DisconnectFullscreenTracking(self)
 			Tween(Main, { Size = self._savedSize or self._fullSize }, 0.2, EASE_SOFT)
-			FullscreenBtn.SetIcon("maximize", "\226\150\162")
+			FullscreenBtn.SetIcon("expand", "\226\150\162")
 		end
 	end
 
@@ -1082,6 +1275,7 @@ function NovaUI:CreateWindow(config)
 
 	function Window:Destroy()
 		ClosePopup()
+		DisconnectFullscreenTracking(self)
 		ScreenGui:Destroy()
 	end
 
@@ -1136,47 +1330,93 @@ function NovaUI:CreateWindow(config)
 
 	--- Window:AddConfig(name) — registers a name in the top config selector.
 	--- Window.ConfigSelector:OnChanged(fn) fires with the selected name.
-	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), _options = {}, _buttons = {} }
+	--- Window.ConfigSelector:OnSave(fn) fires with (name, jsonString) when the
+	--- save-config button is clicked — jsonString is every registered
+	--- option's current value, JSON-encoded (Colorpicker values included).
+	--- Hook up your own persistence (e.g. writeFile) inside that callback.
+	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), Save = Signal.new(), _options = {}, _buttons = {} }
 	function ConfigSelector:OnChanged(fn) ConfigSelector.Changed:Connect(fn) end
+	function ConfigSelector:OnSave(fn) ConfigSelector.Save:Connect(fn) end
 	function ConfigSelector:SetValue(name)
 		ConfigSelector.Value = name
 		SelectorLabel.Text = name
 		ConfigSelector.Changed:Fire(name)
 	end
+
+	local function CreateOptionButton(name, layoutOrder)
+		local btn = New("TextButton", {
+			Text = name,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = theme.Text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			BackgroundColor3 = theme.Accent,
+			BackgroundTransparency = 1,
+			AutoButtonColor = false,
+			Size = UDim2.new(1, 0, 0, 26),
+			LayoutOrder = layoutOrder,
+			Parent = SelectorList,
+		})
+		Round(btn, 4)
+		Pad(btn, 8, 0, 8, 0)
+		btn.MouseEnter:Connect(function() Tween(btn, { BackgroundTransparency = 0.85 }, 0.08) end)
+		btn.MouseLeave:Connect(function() Tween(btn, { BackgroundTransparency = 1 }, 0.08) end)
+		btn.MouseButton1Click:Connect(function()
+			ConfigSelector:SetValue(name)
+			ClosePopup()
+		end)
+		return btn
+	end
+
 	function ConfigSelector:SetOptions(list)
-		for _, btn in ipairs(ConfigSelector._buttons) do btn:Destroy() end
+		for _, btn in pairs(ConfigSelector._buttons) do btn:Destroy() end
 		ConfigSelector._buttons = {}
-		ConfigSelector._options = list
+		ConfigSelector._options = {}
 		for i, name in ipairs(list) do
-			local btn = New("TextButton", {
-				Text = name,
-				Font = Enum.Font.Gotham,
-				TextSize = 12,
-				TextColor3 = theme.Text,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				BackgroundColor3 = theme.Accent,
-				BackgroundTransparency = 1,
-				AutoButtonColor = false,
-				Size = UDim2.new(1, 0, 0, 26),
-				LayoutOrder = i,
-				Parent = SelectorList,
-			})
-			Round(btn, 4)
-			Pad(btn, 8, 0, 8, 0)
-			btn.MouseEnter:Connect(function() Tween(btn, { BackgroundTransparency = 0.85 }, 0.08) end)
-			btn.MouseLeave:Connect(function() Tween(btn, { BackgroundTransparency = 1 }, 0.08) end)
-			btn.MouseButton1Click:Connect(function()
-				ConfigSelector:SetValue(name)
-				ClosePopup()
-			end)
-			table.insert(ConfigSelector._buttons, btn)
+			table.insert(ConfigSelector._options, name)
+			ConfigSelector._buttons[name] = CreateOptionButton(name, i)
 		end
 	end
+
+	--- ConfigSelector:AddOption(name) — appends one entry to the dropdown
+	--- without rebuilding the whole list (keeps existing entries/order).
+	function ConfigSelector:AddOption(name)
+		if ConfigSelector._buttons[name] then return end
+		table.insert(ConfigSelector._options, name)
+		ConfigSelector._buttons[name] = CreateOptionButton(name, #ConfigSelector._options)
+	end
+
+	--- ConfigSelector:RemoveOption(name) — removes one entry from the dropdown.
+	function ConfigSelector:RemoveOption(name)
+		local btn = ConfigSelector._buttons[name]
+		if not btn then return end
+		btn:Destroy()
+		ConfigSelector._buttons[name] = nil
+		for i, n in ipairs(ConfigSelector._options) do
+			if n == name then
+				table.remove(ConfigSelector._options, i)
+				break
+			end
+		end
+	end
+
 	SelectorPill.MouseButton1Click:Connect(function()
 		OpenPopup(SelectorList, SelectorPill, { Align = "left" })
 	end)
+	SaveConfigBtn.MouseButton1Click:Connect(function()
+		ConfigSelector.Save:Fire(ConfigSelector.Value, NovaUI:ExportConfigJSON())
+	end)
 	Window.ConfigSelector = ConfigSelector
 	Window.Search = { Box = SearchBox }
+
+	--- Window:LoadConfig(data) — data is a JSON string (or plain table) of
+	--- id -> value pairs, as produced by NovaUI:ExportConfigJSON()/ExportConfig().
+	--- Applies each value to the matching live section item. Your own script
+	--- decides how the JSON gets here (read from file, DataStore, etc.) — the
+	--- library only handles turning it back into on-screen state.
+	function Window:LoadConfig(data)
+		return NovaUI:ApplyConfig(data)
+	end
 
 	function Window:SelectTab(index)
 		local tab = self._tabs[index]
@@ -1406,11 +1646,18 @@ function NovaUI:CreateWindow(config)
 			if not Tab._columns[columnIndex] then
 				local col = New("Frame", {
 					BackgroundTransparency = 1,
-					Size = UDim2.new(0.5, -12, 0, 0),
+					-- Width is handled by UIFlexItem below (Fill), not a
+					-- manual "0.5 scale minus half the gap" calculation —
+					-- that arithmetic rounds slightly differently per
+					-- column at certain widths, which is what pushed the
+					-- second column a few pixels past the edge. Flex lets
+					-- Roblox compute the exact split itself.
+					Size = UDim2.new(0, 0, 0, 0),
 					AutomaticSize = Enum.AutomaticSize.Y,
 					LayoutOrder = columnIndex,
 					Parent = Tab._columnsFrame,
 				})
+				New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = col })
 				New("UIListLayout", {
 					SortOrder = Enum.SortOrder.LayoutOrder,
 					Padding = UDim.new(0, 18),
@@ -1862,7 +2109,9 @@ function NovaUI:CreateWindow(config)
 				return Dropdown
 			end
 
-			--- Section:AddColorpicker(id, { Title, Description, Default, Transparency, Elevated })
+			--- Section:AddColorpicker(id, { Title, Description, Default, Transparency, Elevated, Callback })
+			--- Callback/Changed fire once, with the final Color3, when you click
+			--- off the popup to close it (not while dragging inside it).
 			function Section:AddColorpicker(id, cfg)
 				cfg = cfg or {}
 				local controlWidth = 34
@@ -2019,10 +2268,12 @@ function NovaUI:CreateWindow(config)
 					Colorpicker.Changed:Fire()
 				end
 
+				-- Live preview only — does NOT fire Changed/Callback. The value
+				-- only "finalizes" (fires) when the popup is closed, so you can
+				-- drag around freely and only the final color gets committed.
 				local function Commit()
 					Colorpicker.Value = Color3.fromHSV(h, s, v)
 					Render()
-					Colorpicker.Changed:Fire()
 				end
 
 				local draggingSV, draggingHue, draggingAlpha = false, false, false
@@ -2047,7 +2298,6 @@ function NovaUI:CreateWindow(config)
 							draggingAlpha = true
 							Colorpicker.Transparency = 1 - math.clamp((input.Position.X - alphaBar.AbsolutePosition.X) / alphaBar.AbsoluteSize.X, 0, 1)
 							Render()
-							Colorpicker.Changed:Fire()
 						end
 					end)
 				end
@@ -2068,7 +2318,6 @@ function NovaUI:CreateWindow(config)
 					elseif draggingAlpha and alphaBar then
 						Colorpicker.Transparency = 1 - math.clamp((input.Position.X - alphaBar.AbsolutePosition.X) / alphaBar.AbsoluteSize.X, 0, 1)
 						Render()
-						Colorpicker.Changed:Fire()
 					end
 				end)
 
@@ -2078,7 +2327,15 @@ function NovaUI:CreateWindow(config)
 					-- closed) so the cursors always match the real color.
 					h, s, v = Color3.toHSV(Colorpicker.Value)
 					Render()
-					OpenPopup(popup, swatch, { Align = "right" })
+					OpenPopup(popup, swatch, {
+						Align = "right",
+						OnClose = function()
+							-- The color only finalizes when you click off the
+							-- popup — this is where Changed/Callback actually fire.
+							Colorpicker.Changed:Fire(Colorpicker.Value)
+							if cfg.Callback then cfg.Callback(Colorpicker.Value) end
+						end,
+					})
 				end)
 
 				if id then NovaUI.Options[id] = Colorpicker end
