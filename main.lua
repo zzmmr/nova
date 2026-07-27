@@ -39,6 +39,11 @@
 	from this same table via the icon name string. Without a table set,
 	everything still works — icons just fall back to plain text glyphs.
 
+	Anywhere an icon name is accepted (Tab's `Icon`, SidebarButtons' `Icon`,
+	etc.), you can instead pass a raw numeric asset id (e.g. 123456789) or a
+	ready-made "rbxassetid://...", "rbxasset://...", or "http(s)://..."
+	string, and it's used directly with no lookup in the icon table at all.
+
 	Popups (dropdown lists, colorpickers, the top config selector) render in
 	a dedicated top-level overlay layer, so they're never occluded by other
 	rows/sections and close automatically on an outside click.
@@ -77,6 +82,11 @@ local Themes = {
 		Divider = Color3.fromRGB(36, 36, 43),
 	},
 }
+
+-- Declared here (before the utilities below that reference it, like
+-- AddShadow checking NovaUI.ReducedEffects) — populated with the rest of
+-- its fields/methods further down where LIBRARY ROOT is.
+local NovaUI = {}
 
 --=============================================================================
 -- UTILITIES
@@ -187,9 +197,12 @@ local function AddShadow(parent, opts)
 		Transparency = opts.Transparency or 0.6,
 		Offset = UDim2.fromOffset(opts.OffsetX or 0, opts.OffsetY or 6),
 		Spread = opts.Spread or UDim2.fromScale(0, 0),
-		BlurRadius = UDim.new(0, opts.Blur or 24),
+		-- BlurRadius is a real GPU blur post-effect — the priciest part of a
+		-- shadow. ReducedEffects drops it to 0 (a flat, cheap offset shadow)
+		-- and disables the shadow outright, for lower-end hardware.
+		BlurRadius = UDim.new(0, NovaUI.ReducedEffects and 0 or (opts.Blur or 24)),
 		ZIndex = opts.ZIndex or 0,
-		Enabled = opts.Enabled ~= false,
+		Enabled = (opts.Enabled ~= false) and not NovaUI.ReducedEffects,
 		Parent = parent,
 	})
 end
@@ -265,12 +278,22 @@ end
 -- LIBRARY ROOT
 --=============================================================================
 
-local NovaUI = {}
 NovaUI.Version = "2.0.0"
 NovaUI.Options = {}
 NovaUI.Unloaded = false
 NovaUI.Theme = Themes.Dark
 NovaUI.Icons = nil
+
+-- UIShadow's BlurRadius is a real (GPU) blur post-effect — cheap for one
+-- small shadow, but can add up if it's on a big window plus several popups
+-- at once, especially on lower-end hardware/older devices. When true, every
+-- AddShadow() call below skips the blur (and the shadow itself) entirely.
+-- Toggle with NovaUI:SetReducedEffects(true) or CreateWindow's
+-- `ReducedEffects = true`.
+NovaUI.ReducedEffects = false
+function NovaUI:SetReducedEffects(enabled)
+	NovaUI.ReducedEffects = enabled and true or false
+end
 
 --=============================================================================
 -- CONFIG SERIALIZATION (JSON) — Color3 values are stored as a tagged
@@ -384,8 +407,40 @@ end
 
 -- Returns an ImageLabel for `name` from the icon table, or nil if
 -- unavailable/not found — callers should always have a text fallback.
+--
+-- `name` doesn't have to be a name in the icon table at all: pass a raw
+-- numeric asset id (e.g. 123456789), or a string already in
+-- rbxassetid://, rbxasset://, or http(s):// form, and it's used directly as
+-- the image with no lookup — handy for Tab/AddSidebarButton icons when you'd
+-- rather point straight at a decal than add an entry to the icon table.
 local function GetIcon(name, size, propsOverrides)
 	if not name or name == "" then return nil end
+
+	local directImage
+	if type(name) == "number" then
+		directImage = "rbxassetid://" .. tostring(name)
+	elseif type(name) == "string"
+		and (name:match("^rbxassetid://") or name:match("^rbxasset://") or name:match("^https?://")) then
+		directImage = name
+	end
+	if directImage then
+		local target = size or 20
+		local ok, label = pcall(function()
+			return New("ImageLabel", {
+				Image = directImage,
+				BackgroundTransparency = 1,
+				Size = UDim2.fromOffset(target, target),
+			})
+		end)
+		if not ok or not label then return nil end
+		if propsOverrides then
+			for prop, value in pairs(propsOverrides) do
+				label[prop] = value
+			end
+		end
+		return label
+	end
+
 	local sheet = TryFindIcons()
 	if not sheet then return nil end
 
@@ -649,6 +704,9 @@ function NovaUI:CreateWindow(config)
 	if config.Icons then
 		NovaUI.Icons = config.Icons
 	end
+	if config.ReducedEffects ~= nil then
+		NovaUI:SetReducedEffects(config.ReducedEffects)
+	end
 
 	local size = config.Size or UDim2.fromOffset(600, 480)
 	local railWidth = config.TabWidth or 64
@@ -756,7 +814,7 @@ function NovaUI:CreateWindow(config)
 	})
 	Round(Main, 14)
 	Stroke(Main, theme.Border, 1)
-	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 30 })
+	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 20 })
 	local mainScale = New("UIScale", { Scale = 0.97, Parent = Main })
 
 	-- Opening animation: a restrained fade + tiny scale-up (no bounce).
@@ -1398,6 +1456,16 @@ function NovaUI:CreateWindow(config)
 				PagesContainer.Visible = true
 				ContentArea.Position = UDim2.new(0, railWidth, 0, 0)
 				ContentArea.Size = UDim2.new(1, -railWidth, 1, 0)
+				-- Main.Position right now is wherever the MINIMIZED bar was
+				-- left (safe for a short bar, e.g. dragged near the top of
+				-- the screen) — pairing that raw position with the tall
+				-- pre-minimize size below is exactly what pushed the
+				-- restored window's top half off-screen. Resize back to the
+				-- pre-minimize size now (instantly, invisibly — it's about
+				-- to be overwritten by the fullscreen tween anyway) using
+				-- the same top-left-preserving math minimize/restore uses,
+				-- so the position we save is actually safe for that size.
+				ResizeKeepingTopLeft(self._preMinimizeSize or self._fullSize)
 			end
 			self._savedSize = self._preMinimizeSize or Main.Size
 			self._savedPosition = Main.Position
@@ -1477,6 +1545,25 @@ function NovaUI:CreateWindow(config)
 		end))
 	end
 
+	--- Window:SetVisible(visible) / Window:ToggleVisible() — fully shows or
+	--- hides the whole GUI (ScreenGui.Enabled), distinct from ToggleMinimize
+	--- (which just collapses to the top bar, keeping it visible/usable).
+	--- Bound to `config.ToggleKey` below if given.
+	function Window:SetVisible(visible)
+		ScreenGui.Enabled = visible
+	end
+	function Window:ToggleVisible()
+		Window:SetVisible(not ScreenGui.Enabled)
+	end
+	if config.ToggleKey then
+		Track(UserInputService.InputBegan:Connect(function(input, processed)
+			if processed then return end
+			if input.KeyCode == config.ToggleKey then
+				Window:ToggleVisible()
+			end
+		end))
+	end
+
 	function Window:Destroy()
 		ClosePopup()
 		DisconnectFullscreenTracking(self)
@@ -1549,9 +1636,15 @@ function NovaUI:CreateWindow(config)
 	--- save-config button is clicked — jsonString is every registered
 	--- option's current value, JSON-encoded (Colorpicker values included).
 	--- Hook up your own persistence (e.g. writeFile) inside that callback.
-	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), Save = Signal.new(), _options = {}, _buttons = {} }
+	--- Window.ConfigSelector:OnCreate(fn) fires with just the name whenever a
+	--- new config is made via the "Create Config" ribbon button's dialog —
+	--- a good place to save a fresh (empty/default) file for it right away.
+	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), Save = Signal.new(), Created = Signal.new(), _options = {}, _buttons = {} }
 	function ConfigSelector:OnChanged(fn) ConfigSelector.Changed:Connect(fn) end
 	function ConfigSelector:OnSave(fn) ConfigSelector.Save:Connect(fn) end
+	--- ConfigSelector:OnCreate(fn) — fires with the new name whenever a
+	--- config is made via the "Create Config" ribbon button's dialog.
+	function ConfigSelector:OnCreate(fn) ConfigSelector.Created:Connect(fn) end
 	function ConfigSelector:SetValue(name)
 		ConfigSelector.Value = name
 		SelectorLabel.Text = name
@@ -1634,6 +1727,7 @@ function NovaUI:CreateWindow(config)
 						if not name or name == "" then return end
 						ConfigSelector:AddOption(name)
 						ConfigSelector:SetValue(name)
+						ConfigSelector.Created:Fire(name)
 					end,
 				},
 			},
@@ -1918,9 +2012,14 @@ function NovaUI:CreateWindow(config)
 		-- or a plain paragraph.
 		--=====================================================================
 
-		--- Tab:AddSection({ Title, Column }) -> Section
+		--- Tab:AddSection({ Title, Column, Order }) -> Section
 		--- Column is 1 or 2 (default 1), placing the section in the left or
-		--- right column, mirroring a two-panel settings layout.
+		--- right column, mirroring a two-panel settings layout. There's only
+		--- ever these two columns, but you can add as many sections to each
+		--- as you want — they stack vertically in the order you add them, so
+		--- a 3rd section with Column=1 lands below the 1st, a 4th with
+		--- Column=2 lands below the 2nd, and so on. Pass Order to control
+		--- the stacking position explicitly instead of relying on call order.
 		function Tab:AddSection(sectionCfg)
 			sectionCfg = sectionCfg or {}
 			local columnIndex = sectionCfg.Column or 1
@@ -2000,10 +2099,18 @@ function NovaUI:CreateWindow(config)
 
 			local column = Tab._columns[columnIndex]
 
+			-- Sections stack vertically within their column in the order
+			-- they're added — a 3rd AddSection with Column=1 lands below the
+			-- 1st, a 4th with Column=2 lands below the 2nd, and so on.
+			-- (sectionCfg.Order overrides that if you want a specific spot.)
+			Tab._sectionCounts = Tab._sectionCounts or {}
+			Tab._sectionCounts[columnIndex] = (Tab._sectionCounts[columnIndex] or 0) + 1
+
 			local sectionFrame = New("Frame", {
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, 0, 0, 0),
 				AutomaticSize = Enum.AutomaticSize.Y,
+				LayoutOrder = sectionCfg.Order or Tab._sectionCounts[columnIndex],
 				Parent = column,
 			})
 			New("UIListLayout", {
@@ -2726,10 +2833,19 @@ function NovaUI:CreateWindow(config)
 					TextSize = 12,
 					TextColor3 = theme.Text,
 					BackgroundColor3 = theme.ElementBackgroundHover,
+					AutoButtonColor = false,
 					Size = UDim2.new(0, controlWidth, 0, 26),
 					Parent = controlHolder,
 				})
 				Round(keyBtn, 6)
+				local keyBtnStroke = Stroke(keyBtn, theme.Accent, 1.5, 1)
+				AddHoverScale(keyBtn, 1.05)
+				keyBtn.MouseEnter:Connect(function()
+					Tween(keyBtn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
+				end)
+				keyBtn.MouseLeave:Connect(function()
+					Tween(keyBtn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+				end)
 
 				local Keybind = {
 					Value = cfg.Default,
@@ -2751,9 +2867,35 @@ function NovaUI:CreateWindow(config)
 					if cfg.ChangedCallback then cfg.ChangedCallback(key) end
 				end
 
+				-- Pulses the accent stroke while waiting for a keypress, so
+				-- "listening" mode reads as clearly active/alive, not just a
+				-- static "..." label.
+				local listenPulseTween
+				local function StopListenPulse()
+					if listenPulseTween then
+						listenPulseTween:Cancel()
+						listenPulseTween = nil
+					end
+					Tween(keyBtnStroke, { Transparency = 1 }, 0.12)
+				end
+				local function StartListenPulse()
+					if not keyBtnStroke.Parent then return end
+					keyBtnStroke.Transparency = 0.2
+					listenPulseTween = Tween(keyBtnStroke, { Transparency = 0.75 }, 0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+					listenPulseTween.Completed:Connect(function()
+						if Keybind._listening and keyBtnStroke.Parent then
+							listenPulseTween = Tween(keyBtnStroke, { Transparency = 0.2 }, 0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+							listenPulseTween.Completed:Connect(function()
+								if Keybind._listening then StartListenPulse() end
+							end)
+						end
+					end)
+				end
+
 				keyBtn.MouseButton1Click:Connect(function()
 					Keybind._listening = true
 					keyBtn.Text = "..."
+					StartListenPulse()
 				end)
 
 				Track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -2764,6 +2906,7 @@ function NovaUI:CreateWindow(config)
 						elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
 						if keyName then
 							Keybind._listening = false
+							StopListenPulse()
 							Keybind:SetValue(keyName)
 						end
 						return
