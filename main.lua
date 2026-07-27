@@ -1094,7 +1094,7 @@ function NovaUI:CreateWindow(config)
 	-- next to the selector needs the room in the top bar).
 	local SearchPill = New("Frame", {
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 170, 1, 0),
+		Size = UDim2.new(0, 150, 1, 0),
 		LayoutOrder = 1,
 		Parent = TopBarRow,
 	})
@@ -1146,7 +1146,7 @@ function NovaUI:CreateWindow(config)
 	local SelectorPill = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 176, 1, 0),
+		Size = UDim2.new(0, 156, 1, 0),
 		AutoButtonColor = false,
 		LayoutOrder = 2,
 		ZIndex = 2,
@@ -1217,7 +1217,7 @@ function NovaUI:CreateWindow(config)
 		BackgroundColor3 = theme.PopupBackground,
 		BackgroundTransparency = 0,
 		Visible = false,
-		Size = UDim2.new(0, 176, 0, 0),
+		Size = UDim2.new(0, 156, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = Overlay,
 	})
