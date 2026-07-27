@@ -85,7 +85,7 @@ local Themes = {
 -- Sidebar background: a matte near-black blended faintly toward Accent, so
 -- it reads as "dark with a hint of blue" rather than plain flat gray/black,
 -- without needing a hardcoded color that'd look wrong if Accent is changed.
-Themes.Dark.SidebarBackground = Themes.Dark.Background:Lerp(Themes.Dark.Accent, 0.12)
+Themes.Dark.SidebarBackground = Themes.Dark.Background:Lerp(Themes.Dark.Accent, 0.06)
 
 -- Declared here (before the utilities below that reference it, like
 -- AddShadow checking NovaUI.ReducedEffects) — populated with the rest of
@@ -112,8 +112,18 @@ local function New(className, props, children)
 	return inst
 end
 
-local function Round(inst, radius)
-	New("UICorner", { CornerRadius = UDim.new(0, radius or 6), Parent = inst })
+-- `corners`, if given, overrides individual corners on top of the uniform
+-- `radius` — e.g. Round(Sidebar, 14, { TopRight = 0, BottomRight = 0 }) for
+-- a panel that's only rounded on the outer (left) edge. Keys: TopLeft,
+-- TopRight, BottomLeft, BottomRight.
+local function Round(inst, radius, corners)
+	local corner = New("UICorner", { CornerRadius = UDim.new(0, radius or 6), Parent = inst })
+	if corners then
+		if corners.TopLeft ~= nil then corner.TopLeftRadius = UDim.new(0, corners.TopLeft) end
+		if corners.TopRight ~= nil then corner.TopRightRadius = UDim.new(0, corners.TopRight) end
+		if corners.BottomLeft ~= nil then corner.BottomLeftRadius = UDim.new(0, corners.BottomLeft) end
+		if corners.BottomRight ~= nil then corner.BottomRightRadius = UDim.new(0, corners.BottomRight) end
+	end
 	return inst
 end
 
@@ -968,9 +978,10 @@ function NovaUI:CreateWindow(config)
 		Size = UDim2.new(0, railWidth, 1, 0),
 		Parent = Main,
 	})
-	-- Rounds all 4 corners for simplicity (Roblox has no per-corner radius);
-	-- the right two corners are covered by ContentArea sitting flush beside it.
-	Round(Sidebar, 14)
+	-- Only the outer (left) corners are rounded — the right two are square
+	-- since ContentArea sits flush against them, matching Main's shape
+	-- instead of poking a rounded corner out into it.
+	Round(Sidebar, 14, { TopRight = 0, BottomRight = 0 })
 
 	local LogoBox = New("Frame", {
 		BackgroundTransparency = 1,
@@ -1523,7 +1534,7 @@ function NovaUI:CreateWindow(config)
 		local MIN_WIDTH = math.max(360, railWidth + 220)
 		local MIN_HEIGHT = math.max(280, topBarHeight + 160)
 		local resizing = false
-		local resizeStart, startSize
+		local resizeStart, startSize, resizeTopLeft
 
 		Track(ResizeHandle.InputBegan:Connect(function(input)
 			if Window._minimized or Window._fullscreen then return end
@@ -1531,15 +1542,37 @@ function NovaUI:CreateWindow(config)
 				resizing = true
 				resizeStart = input.Position
 				startSize = Main.Size
+				-- Captured once, at drag start, and never moved for the rest
+				-- of the drag — see the comment below for why.
+				resizeTopLeft = Main.AbsolutePosition
 			end
 		end))
 		Track(UserInputService.InputChanged:Connect(function(input)
 			if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 				local delta = input.Position - resizeStart
-				local newWidth = math.max(MIN_WIDTH, startSize.X.Offset + delta.X)
-				local newHeight = math.max(MIN_HEIGHT, startSize.Y.Offset + delta.Y)
+				local screenSize = ScreenGui.AbsoluteSize
+				-- Also clamped so the window can't be dragged wider/taller
+				-- than what actually fits between its (fixed) top-left
+				-- corner and the edge of the screen.
+				local maxWidth = math.max(MIN_WIDTH, screenSize.X - resizeTopLeft.X)
+				local maxHeight = math.max(MIN_HEIGHT, screenSize.Y - resizeTopLeft.Y)
+				local newWidth = math.clamp(startSize.X.Offset + delta.X, MIN_WIDTH, maxWidth)
+				local newHeight = math.clamp(startSize.Y.Offset + delta.Y, MIN_HEIGHT, maxHeight)
+
+				-- Main is AnchorPoint(0.5,0.5), so just setting Size here
+				-- (like before) would grow/shrink the window symmetrically
+				-- around its CENTER — meaning the top edge (where minimize/
+				-- fullscreen/close live) moves too, even though you're
+				-- dragging the BOTTOM-RIGHT corner. That's what could push
+				-- those buttons off the top of the screen. Recomputing
+				-- Position every step to keep resizeTopLeft fixed makes this
+				-- behave like a normal corner-drag resize instead: only the
+				-- bottom-right corner moves.
+				local newCenterX = resizeTopLeft.X + newWidth / 2
+				local newCenterY = resizeTopLeft.Y + newHeight / 2
 				local newSize = UDim2.new(startSize.X.Scale, newWidth, startSize.Y.Scale, newHeight)
 				Main.Size = newSize
+				Main.Position = UDim2.new(0.5, newCenterX - screenSize.X * 0.5, 0.5, newCenterY - screenSize.Y * 0.5)
 				Window._fullSize = newSize
 			end
 		end))
