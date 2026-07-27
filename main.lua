@@ -5,9 +5,22 @@
 	This is a standalone ModuleScript. Put it in ReplicatedStorage (or anywhere
 	a LocalScript can reach it) and `require()` it — see example.lua for usage.
 
+	Layout: icon-only sidebar rail + search/selector bar + two-column grouped
+	settings sections (rows with inline toggle/dropdown/slider controls),
+	styled after a dark dashboard-style settings panel.
+
+	Icons: optional integration with latte-soft/lucide-roblox
+	(https://github.com/latte-soft/lucide-roblox). If a "Lucide" ModuleScript
+	is found under ReplicatedStorage (or passed via CreateWindow's
+	`IconProvider` option / NovaUI:SetIconProvider), sidebar tab icons and a
+	few chrome icons (search, folder, chevron, close) render using it.
+	Without it, everything still works — icons just fall back to plain text/
+	initials so the library has no hard dependency.
+
 	Components:
-		Window, Tab, Paragraph, Button, Toggle, Slider, Dropdown (single/multi),
-		Colorpicker (with optional transparency), Keybind, Input, Notify, Dialog
+		Window, Tab, Section/Row (grouped settings list), Paragraph, Button,
+		Toggle, Slider, Dropdown (single/multi), Colorpicker (with optional
+		transparency), Keybind, Input, Notify, Dialog
 
 	Theme: dark background with a blue accent (see Themes.Dark below).
 	You can swap NovaUI.Theme for your own table with the same keys.
@@ -16,6 +29,7 @@
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -27,14 +41,14 @@ local Themes = {
 	Dark = {
 		Accent = Color3.fromRGB(70, 130, 255),
 		AccentHover = Color3.fromRGB(95, 150, 255),
-		Background = Color3.fromRGB(17, 17, 21),
-		SecondaryBackground = Color3.fromRGB(22, 22, 27),
-		ElementBackground = Color3.fromRGB(28, 28, 34),
-		ElementBackgroundHover = Color3.fromRGB(36, 36, 43),
+		Background = Color3.fromRGB(15, 15, 19),
+		SecondaryBackground = Color3.fromRGB(19, 19, 24),
+		ElementBackground = Color3.fromRGB(26, 26, 32),
+		ElementBackgroundHover = Color3.fromRGB(34, 34, 41),
 		Text = Color3.fromRGB(235, 236, 240),
-		SubText = Color3.fromRGB(145, 147, 160),
-		Border = Color3.fromRGB(42, 42, 50),
-		Divider = Color3.fromRGB(38, 38, 45),
+		SubText = Color3.fromRGB(140, 142, 155),
+		Border = Color3.fromRGB(40, 40, 48),
+		Divider = Color3.fromRGB(36, 36, 43),
 	},
 }
 
@@ -150,10 +164,47 @@ end
 --=============================================================================
 
 local NovaUI = {}
-NovaUI.Version = "1.0.0"
+NovaUI.Version = "1.1.0"
 NovaUI.Options = {}
 NovaUI.Unloaded = false
 NovaUI.Theme = Themes.Dark
+NovaUI.IconProvider = nil
+
+--- Optional: NovaUI:SetIconProvider(require(path.to.Lucide))
+-- Hooks up latte-soft/lucide-roblox (or any module exposing the same
+-- `ImageLabel(name, size, propsOverrides)` API) so tab/chrome icons render
+-- as real Lucide glyphs instead of falling back to text.
+function NovaUI:SetIconProvider(module)
+	NovaUI.IconProvider = module
+end
+
+local function TryFindLucide()
+	if NovaUI.IconProvider then
+		return NovaUI.IconProvider
+	end
+	local ok, mod = pcall(function()
+		local found = ReplicatedStorage:FindFirstChild("Lucide") or ReplicatedStorage:FindFirstChild("lucide-roblox")
+		return found and require(found)
+	end)
+	if ok and mod then
+		NovaUI.IconProvider = mod
+		return mod
+	end
+	return nil
+end
+
+-- Returns an ImageLabel for `name` via the icon provider, or nil if
+-- unavailable/not found — callers should always have a text fallback.
+local function GetIcon(name, size, propsOverrides)
+	if not name or name == "" then return nil end
+	local provider = TryFindLucide()
+	if not provider then return nil end
+	local ok, imageLabel = pcall(function()
+		return provider.ImageLabel(name, size or 20, propsOverrides)
+	end)
+	if ok and imageLabel then return imageLabel end
+	return nil
+end
 
 local NotifHolder -- created lazily, one per Library instance
 
@@ -292,9 +343,13 @@ function NovaUI:CreateWindow(config)
 		theme = Themes[config.Theme]
 		NovaUI.Theme = theme
 	end
+	if config.IconProvider then
+		NovaUI.IconProvider = config.IconProvider
+	end
 
-	local size = config.Size or UDim2.fromOffset(580, 460)
-	local tabWidth = config.TabWidth or 160
+	local size = config.Size or UDim2.fromOffset(600, 480)
+	local railWidth = config.TabWidth or 64
+	local topBarHeight = 64
 
 	local ScreenGui = New("ScreenGui", {
 		Name = "NovaUI",
@@ -307,119 +362,330 @@ function NovaUI:CreateWindow(config)
 	local Main = New("Frame", {
 		Name = "Main",
 		BackgroundColor3 = theme.Background,
-		BackgroundTransparency = config.Acrylic and 0.08 or 0,
+		BackgroundTransparency = config.Acrylic and 0.06 or 0,
 		Position = UDim2.new(0.5, -size.X.Offset / 2, 0.5, -size.Y.Offset / 2),
 		Size = size,
 		ClipsDescendants = true,
 		Parent = ScreenGui,
 	})
-	Round(Main, 10)
+	Round(Main, 14)
 	Stroke(Main, theme.Border, 1)
 
-	-- Top bar
-	local TopBar = New("Frame", {
-		Name = "TopBar",
+	--=========================================================================
+	-- SIDEBAR (icon rail, full height)
+	--=========================================================================
+
+	local Sidebar = New("Frame", {
+		Name = "Sidebar",
 		BackgroundColor3 = theme.SecondaryBackground,
-		Size = UDim2.new(1, 0, 0, 48),
+		Size = UDim2.new(0, railWidth, 1, 0),
 		Parent = Main,
 	})
-	Round(TopBar, 10)
-	New("Frame", { -- squares off the bottom corners of the rounded topbar
-		BackgroundColor3 = theme.SecondaryBackground,
-		Position = UDim2.new(0, 0, 1, -10),
-		Size = UDim2.new(1, 0, 0, 10),
-		Parent = TopBar,
-	})
+	-- Rounds all 4 corners for simplicity (Roblox has no per-corner radius);
+	-- the right two corners are covered by ContentArea sitting flush beside it.
+	Round(Sidebar, 14)
 
-	local TitleBox = New("Frame", {
+	local LogoBox = New("Frame", {
 		BackgroundTransparency = 1,
-		Position = UDim2.new(0, 16, 0, 0),
-		Size = UDim2.new(1, -100, 1, 0),
-		Parent = TopBar,
+		Size = UDim2.new(1, 0, 0, 56),
+		Parent = Sidebar,
 	})
-	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, FillDirection = Enum.FillDirection.Vertical, VerticalAlignment = Enum.VerticalAlignment.Center, Parent = TitleBox })
+	local logoMark = New("Frame", {
+		BackgroundColor3 = theme.Accent,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		Size = UDim2.new(0, 32, 0, 32),
+		Parent = LogoBox,
+	})
+	Round(logoMark, 9)
 	New("TextLabel", {
-		Text = config.Title or "NovaUI",
+		Text = (config.Title or "N"):sub(1, 1):upper(),
 		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		TextColor3 = theme.Text,
-		TextXAlignment = Enum.TextXAlignment.Left,
+		TextSize = 15,
+		TextColor3 = Color3.new(1, 1, 1),
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, 18),
-		Parent = TitleBox,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = logoMark,
 	})
-	if config.SubTitle then
-		New("TextLabel", {
-			Text = config.SubTitle,
-			Font = Enum.Font.Gotham,
-			TextSize = 12,
-			TextColor3 = theme.SubText,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			BackgroundTransparency = 1,
-			Size = UDim2.new(1, 0, 0, 14),
-			Parent = TitleBox,
-		})
-	end
 
-	local CloseBtn = New("TextButton", {
-		Text = "\226\156\149",
+	local TabRailScroll = New("ScrollingFrame", {
+		Name = "TabRail",
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0, 56),
+		Size = UDim2.new(1, 0, 1, -100),
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 0,
+		BorderSizePixel = 0,
+		Parent = Sidebar,
+	})
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		Padding = UDim.new(0, 6),
+		Parent = TabRailScroll,
+	})
+
+	local SidebarFooter = New("Frame", {
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -12),
+		Size = UDim2.new(1, 0, 0, 76),
+		Parent = Sidebar,
+	})
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		Padding = UDim.new(0, 10),
+		Parent = SidebarFooter,
+	})
+
+	local ExpandBtn = New("TextButton", {
+		Text = "\226\140\132", -- chevron-ish fallback glyph
 		Font = Enum.Font.GothamBold,
-		TextSize = 14,
+		TextSize = 12,
 		TextColor3 = theme.SubText,
 		BackgroundTransparency = 1,
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -14, 0.5, 0),
 		Size = UDim2.new(0, 24, 0, 24),
-		Parent = TopBar,
+		AutoButtonColor = false,
+		Parent = SidebarFooter,
+	})
+	do
+		local icon = GetIcon("chevron-down", 14, { TextColor3 = theme.SubText })
+		if icon then
+			ExpandBtn.Text = ""
+			icon.AnchorPoint = Vector2.new(0.5, 0.5)
+			icon.Position = UDim2.new(0.5, 0, 0.5, 0)
+			icon.ImageColor3 = theme.SubText
+			icon.Parent = ExpandBtn
+		end
+	end
+
+	local AvatarBtn = New("TextButton", {
+		Text = "",
+		BackgroundColor3 = theme.ElementBackground,
+		Size = UDim2.new(0, 32, 0, 32),
+		AutoButtonColor = false,
+		Parent = SidebarFooter,
+	})
+	Round(AvatarBtn, 16)
+	Stroke(AvatarBtn, theme.Border, 1)
+
+	--=========================================================================
+	-- CONTENT AREA (search/selector bar + tab pages)
+	--=========================================================================
+
+	local ContentArea = New("Frame", {
+		Name = "Content",
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, railWidth, 0, 0),
+		Size = UDim2.new(1, -railWidth, 1, 0),
+		Parent = Main,
+	})
+
+	local ContentTopBar = New("Frame", {
+		Name = "TopBar",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, topBarHeight),
+		Parent = ContentArea,
+	})
+	Pad(ContentTopBar, 20, 14, 20, 14)
+
+	local TopBarRow = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = ContentTopBar,
+	})
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 10),
+		Parent = TopBarRow,
+	})
+
+	-- Search pill
+	local SearchPill = New("Frame", {
+		BackgroundColor3 = theme.ElementBackground,
+		Size = UDim2.new(0, 220, 1, 0),
+		LayoutOrder = 1,
+		Parent = TopBarRow,
+	})
+	Round(SearchPill, 8)
+	Pad(SearchPill, 10, 0, 10, 0)
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 6),
+		Parent = SearchPill,
+	})
+	do
+		local icon = GetIcon("search", 14)
+		if icon then
+			icon.LayoutOrder = 1
+			icon.ImageColor3 = theme.SubText
+			icon.Parent = SearchPill
+		else
+			New("TextLabel", {
+				Text = "\226\140\149",
+				Font = Enum.Font.GothamBold,
+				TextSize = 13,
+				TextColor3 = theme.SubText,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(0, 14, 1, 0),
+				LayoutOrder = 1,
+				Parent = SearchPill,
+			})
+		end
+	end
+	local SearchBox = New("TextBox", {
+		Text = "",
+		PlaceholderText = "Search",
+		Font = Enum.Font.Gotham,
+		TextSize = 13,
+		TextColor3 = theme.Text,
+		PlaceholderColor3 = theme.SubText,
+		ClearTextOnFocus = false,
+		BackgroundTransparency = 1,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, -20, 1, 0),
+		LayoutOrder = 2,
+		Parent = SearchPill,
+	})
+
+	-- Config selector pill (folder icon + label + chevron)
+	local SelectorPill = New("TextButton", {
+		Text = "",
+		BackgroundColor3 = theme.ElementBackground,
+		Size = UDim2.new(0, 176, 1, 0),
+		AutoButtonColor = false,
+		LayoutOrder = 2,
+		Parent = TopBarRow,
+	})
+	Round(SelectorPill, 8)
+	Pad(SelectorPill, 10, 0, 10, 0)
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 6),
+		Parent = SelectorPill,
+	})
+	do
+		local icon = GetIcon("folder", 14)
+		if icon then
+			icon.LayoutOrder = 1
+			icon.ImageColor3 = theme.SubText
+			icon.Parent = SelectorPill
+		else
+			New("TextLabel", {
+				Text = "\226\150\161",
+				Font = Enum.Font.Gotham,
+				TextSize = 12,
+				TextColor3 = theme.SubText,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(0, 14, 1, 0),
+				LayoutOrder = 1,
+				Parent = SelectorPill,
+			})
+		end
+	end
+	local SelectorLabel = New("TextLabel", {
+		Text = config.SubTitle or "New Config 1",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		TextColor3 = theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -40, 1, 0),
+		LayoutOrder = 2,
+		Parent = SelectorPill,
+	})
+	do
+		local icon = GetIcon("chevron-down", 12)
+		if icon then
+			icon.LayoutOrder = 3
+			icon.ImageColor3 = theme.SubText
+			icon.Parent = SelectorPill
+		else
+			New("TextLabel", {
+				Text = "\226\150\190",
+				Font = Enum.Font.Gotham,
+				TextSize = 10,
+				TextColor3 = theme.SubText,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(0, 12, 1, 0),
+				LayoutOrder = 3,
+				Parent = SelectorPill,
+			})
+		end
+	end
+
+	local SelectorList = New("Frame", {
+		BackgroundColor3 = theme.ElementBackgroundHover,
+		Visible = false,
+		ZIndex = 30,
+		Size = UDim2.new(0, 176, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = ContentTopBar,
+	})
+	Round(SelectorList, 8)
+	Stroke(SelectorList, theme.Border, 1)
+	Pad(SelectorList, 4)
+	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorList })
+
+	-- Window chrome (minimize/close) — small, top-right corner
+	local ChromeRow = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 56, 1, 0),
+		LayoutOrder = 3,
+		Parent = TopBarRow,
+	})
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 4),
+		Parent = ChromeRow,
 	})
 	local MinimizeBtn = New("TextButton", {
 		Text = "\226\128\148",
 		Font = Enum.Font.GothamBold,
-		TextSize = 14,
+		TextSize = 13,
 		TextColor3 = theme.SubText,
 		BackgroundTransparency = 1,
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -44, 0.5, 0),
 		Size = UDim2.new(0, 24, 0, 24),
-		Parent = TopBar,
+		LayoutOrder = 1,
+		Parent = ChromeRow,
 	})
-
-	MakeDraggable(Main, TopBar)
-
-	-- Sidebar (tab list)
-	local Sidebar = New("Frame", {
-		Name = "Sidebar",
-		BackgroundColor3 = theme.SecondaryBackground,
-		Position = UDim2.new(0, 0, 0, 48),
-		Size = UDim2.new(0, tabWidth, 1, -48),
-		Parent = Main,
-	})
-
-	local TabScroll = New("ScrollingFrame", {
+	local CloseBtn = New("TextButton", {
+		Text = "\226\156\149",
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = theme.SubText,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 1, 0),
-		CanvasSize = UDim2.new(0, 0, 0, 0),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		ScrollBarThickness = 2,
-		ScrollBarImageColor3 = theme.Border,
-		BorderSizePixel = 0,
-		Parent = Sidebar,
-	})
-	Pad(TabScroll, 10)
-	New("UIListLayout", {
-		SortOrder = Enum.SortOrder.LayoutOrder,
-		Padding = UDim.new(0, 4),
-		Parent = TabScroll,
+		Size = UDim2.new(0, 24, 0, 24),
+		LayoutOrder = 2,
+		Parent = ChromeRow,
 	})
 
-	-- Content area
-	local ContentArea = New("Frame", {
-		Name = "Content",
+	MakeDraggable(Main, LogoBox)
+	MakeDraggable(Main, ContentTopBar)
+
+	local PagesContainer = New("Frame", {
+		Name = "Pages",
 		BackgroundTransparency = 1,
-		Position = UDim2.new(0, tabWidth, 0, 48),
-		Size = UDim2.new(1, -tabWidth, 1, -48),
-		Parent = Main,
+		Position = UDim2.new(0, 0, 0, topBarHeight),
+		Size = UDim2.new(1, 0, 1, -topBarHeight),
+		Parent = ContentArea,
 	})
+
+	--=========================================================================
+	-- WINDOW OBJECT
+	--=========================================================================
 
 	local Window = {}
 	Window._tabs = {}
@@ -427,6 +693,9 @@ function NovaUI:CreateWindow(config)
 	Window._main = Main
 	Window._minimized = false
 	Window._fullSize = size
+	Window._activeTabIndex = 1
+	Window._searchRows = {} -- { {Instance, TitleLower, TabIndex}, ... }
+	Window._searchText = ""
 
 	CloseBtn.MouseButton1Click:Connect(function()
 		Window:Destroy()
@@ -439,7 +708,7 @@ function NovaUI:CreateWindow(config)
 	function Window:ToggleMinimize()
 		self._minimized = not self._minimized
 		if self._minimized then
-			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 48) }, 0.2)
+			Tween(Main, { Size = UDim2.new(0, self._fullSize.X.Offset, 0, 56) }, 0.2)
 			Sidebar.Visible = false
 			ContentArea.Visible = false
 		else
@@ -462,17 +731,80 @@ function NovaUI:CreateWindow(config)
 		ScreenGui:Destroy()
 	end
 
+	local function ApplySearchFilter()
+		local query = Window._searchText:lower()
+		for _, entry in ipairs(Window._searchRows) do
+			if entry.TabIndex == Window._activeTabIndex then
+				entry.Instance.Visible = (query == "") or entry.TitleLower:find(query, 1, true) ~= nil
+			end
+		end
+	end
+
+	SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		Window._searchText = SearchBox.Text
+		ApplySearchFilter()
+	end)
+
+	--- Window:AddConfig(name) — registers a name in the top config selector.
+	--- Window.ConfigSelector:OnChanged(fn) fires with the selected name.
+	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), _options = {}, _buttons = {} }
+	function ConfigSelector:OnChanged(fn) ConfigSelector.Changed:Connect(fn) end
+	function ConfigSelector:SetValue(name)
+		ConfigSelector.Value = name
+		SelectorLabel.Text = name
+		ConfigSelector.Changed:Fire(name)
+	end
+	function ConfigSelector:SetOptions(list)
+		for _, btn in ipairs(ConfigSelector._buttons) do btn:Destroy() end
+		ConfigSelector._buttons = {}
+		ConfigSelector._options = list
+		for i, name in ipairs(list) do
+			local btn = New("TextButton", {
+				Text = name,
+				Font = Enum.Font.Gotham,
+				TextSize = 12,
+				TextColor3 = theme.Text,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				BackgroundColor3 = theme.Accent,
+				BackgroundTransparency = 1,
+				AutoButtonColor = false,
+				Size = UDim2.new(1, 0, 0, 26),
+				LayoutOrder = i,
+				ZIndex = 31,
+				Parent = SelectorList,
+			})
+			Round(btn, 4)
+			Pad(btn, 8, 0, 8, 0)
+			btn.MouseEnter:Connect(function() btn.BackgroundTransparency = 0.85 end)
+			btn.MouseLeave:Connect(function() btn.BackgroundTransparency = 1 end)
+			btn.MouseButton1Click:Connect(function()
+				ConfigSelector:SetValue(name)
+				SelectorList.Visible = false
+			end)
+			table.insert(ConfigSelector._buttons, btn)
+		end
+	end
+	SelectorPill.MouseButton1Click:Connect(function()
+		SelectorList.Visible = not SelectorList.Visible
+	end)
+	Window.ConfigSelector = ConfigSelector
+	Window.Search = { Box = SearchBox }
+
 	function Window:SelectTab(index)
 		local tab = self._tabs[index]
 		if not tab then return end
-		for _, t in ipairs(self._tabs) do
-			t._page.Visible = false
-			t._button.BackgroundTransparency = 1
-			t._label.TextColor3 = theme.SubText
+		self._activeTabIndex = index
+		for i, t in ipairs(self._tabs) do
+			t._page.Visible = (i == index)
+			t._button.BackgroundTransparency = (i == index) and 0.85 or 1
+			if t._icon then
+				t._icon.ImageColor3 = (i == index) and theme.Accent or theme.SubText
+			end
+			if t._fallbackLabel then
+				t._fallbackLabel.TextColor3 = (i == index) and theme.Accent or theme.SubText
+			end
 		end
-		tab._page.Visible = true
-		tab._button.BackgroundTransparency = 0
-		tab._label.TextColor3 = theme.Text
+		ApplySearchFilter()
 	end
 
 	--- Window:Dialog({ Title, Content, Buttons = {{Title, Callback}, ...} })
@@ -576,24 +908,61 @@ function NovaUI:CreateWindow(config)
 			Text = "",
 			BackgroundColor3 = theme.Accent,
 			BackgroundTransparency = 1,
-			Size = UDim2.new(1, 0, 0, 34),
+			Size = UDim2.new(0, 40, 0, 40),
 			AutoButtonColor = false,
 			LayoutOrder = index,
-			Parent = TabScroll,
+			Parent = TabRailScroll,
 		})
-		Round(button, 6)
+		Round(button, 10)
 
-		local label = New("TextLabel", {
+		local iconImage = tabConfig.Icon and GetIcon(tabConfig.Icon, 20) or nil
+		local fallbackLabel
+		if iconImage then
+			iconImage.AnchorPoint = Vector2.new(0.5, 0.5)
+			iconImage.Position = UDim2.new(0.5, 0, 0.5, 0)
+			iconImage.ImageColor3 = theme.SubText
+			iconImage.Parent = button
+		else
+			fallbackLabel = New("TextLabel", {
+				Text = (tabConfig.Title or "T"):sub(1, 1):upper(),
+				Font = Enum.Font.GothamBold,
+				TextSize = 15,
+				TextColor3 = theme.SubText,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 1, 0),
+				Parent = button,
+			})
+		end
+
+		-- Tooltip (parented to ScreenGui so it isn't clipped by Main)
+		local tooltip = New("TextLabel", {
 			Text = tabConfig.Title or ("Tab " .. index),
 			Font = Enum.Font.GothamMedium,
-			TextSize = 13,
-			TextColor3 = theme.SubText,
-			BackgroundTransparency = 1,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			Position = UDim2.new(0, 12, 0, 0),
-			Size = UDim2.new(1, -24, 1, 0),
-			Parent = button,
+			TextSize = 12,
+			TextColor3 = theme.Text,
+			BackgroundColor3 = theme.ElementBackgroundHover,
+			Visible = false,
+			ZIndex = 100,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.new(0, 0, 0, 24),
+			Parent = ScreenGui,
 		})
+		Round(tooltip, 5)
+		Pad(tooltip, 8, 0, 8, 0)
+
+		button.MouseEnter:Connect(function()
+			tooltip.Position = UDim2.fromOffset(button.AbsolutePosition.X + button.AbsoluteSize.X + 8, button.AbsolutePosition.Y + button.AbsoluteSize.Y / 2 - 12)
+			tooltip.Visible = true
+			if index ~= Window._activeTabIndex then
+				Tween(button, { BackgroundTransparency = 0.9 }, 0.12)
+			end
+		end)
+		button.MouseLeave:Connect(function()
+			tooltip.Visible = false
+			if index ~= Window._activeTabIndex then
+				Tween(button, { BackgroundTransparency = 1 }, 0.12)
+			end
+		end)
 
 		local page = New("ScrollingFrame", {
 			BackgroundTransparency = 1,
@@ -604,36 +973,30 @@ function NovaUI:CreateWindow(config)
 			ScrollBarImageColor3 = theme.Border,
 			BorderSizePixel = 0,
 			Visible = index == 1,
-			Parent = ContentArea,
+			Parent = PagesContainer,
 		})
-		Pad(page, 16)
+		Pad(page, 20, 4, 20, 20)
 		New("UIListLayout", {
 			SortOrder = Enum.SortOrder.LayoutOrder,
 			Padding = UDim.new(0, 10),
 			Parent = page,
 		})
 
-		local Tab = { _page = page, _button = button, _label = label }
+		local Tab = { _page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel, _columns = nil, _columnsFrame = nil }
 
 		button.MouseButton1Click:Connect(function()
 			Window:SelectTab(index)
 		end)
-		button.MouseEnter:Connect(function()
-			if page.Visible then return end
-			Tween(button, { BackgroundTransparency = 0.7 }, 0.12)
-		end)
-		button.MouseLeave:Connect(function()
-			if page.Visible then return end
-			Tween(button, { BackgroundTransparency = 1 }, 0.12)
-		end)
 
 		if index == 1 then
-			button.BackgroundTransparency = 0
-			label.TextColor3 = theme.Text
+			button.BackgroundTransparency = 0.85
+			if iconImage then iconImage.ImageColor3 = theme.Accent end
+			if fallbackLabel then fallbackLabel.TextColor3 = theme.Accent end
 		end
 
 		--=====================================================================
-		-- ELEMENT: Card shell (shared by most elements)
+		-- CLASSIC ELEMENTS (single-column card style — still available,
+		-- handy for a Settings tab, forms, etc.)
 		--=====================================================================
 
 		local function BaseCard(height, layoutOrder)
@@ -998,7 +1361,6 @@ function NovaUI:CreateWindow(config)
 
 			function Dropdown:SetValue(value)
 				if multi then
-					-- value: array of strings OR map {name=true/false}
 					local map = {}
 					if typeof(value) == "table" then
 						if value[1] ~= nil then
@@ -1091,7 +1453,6 @@ function NovaUI:CreateWindow(config)
 			Pad(popup, 10)
 			New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = popup })
 
-			-- Saturation/Value box
 			local svBox = New("Frame", {
 				BackgroundColor3 = Color3.fromRGB(255, 0, 0),
 				Size = UDim2.new(1, 0, 0, 100),
@@ -1100,7 +1461,7 @@ function NovaUI:CreateWindow(config)
 				Parent = popup,
 			})
 			Round(svBox, 4)
-			local whiteGrad = New("UIGradient", { Color = ColorSequence.new(Color3.new(1,1,1), Color3.new(1,1,1)), Transparency = NumberSequence.new(0, 1), Parent = svBox })
+			New("UIGradient", { Color = ColorSequence.new(Color3.new(1,1,1), Color3.new(1,1,1)), Transparency = NumberSequence.new(0, 1), Parent = svBox })
 			local blackOverlay = New("Frame", { BackgroundColor3 = Color3.new(0,0,0), BackgroundTransparency = 1, Size = UDim2.new(1,0,1,0), ZIndex = 21, Parent = svBox })
 			New("UIGradient", { Color = ColorSequence.new(Color3.new(0,0,0), Color3.new(0,0,0)), Transparency = NumberSequence.new(1, 0), Rotation = 90, Parent = blackOverlay })
 
@@ -1114,7 +1475,6 @@ function NovaUI:CreateWindow(config)
 			Round(svCursor, 4)
 			Stroke(svCursor, Color3.new(0,0,0), 1)
 
-			-- Hue bar
 			local hueBar = New("Frame", {
 				Size = UDim2.new(1, 0, 0, 14),
 				ZIndex = 21,
@@ -1261,7 +1621,7 @@ function NovaUI:CreateWindow(config)
 
 			local Keybind = {
 				Value = cfg.Default,
-				Mode = cfg.Mode or "Toggle", -- Always, Toggle, Hold
+				Mode = cfg.Mode or "Toggle",
 				Changed = Signal.new(),
 				Click = Signal.new(),
 				_state = false,
@@ -1400,6 +1760,455 @@ function NovaUI:CreateWindow(config)
 
 			NovaUI.Options[id] = Input
 			return Input
+		end
+
+		--=====================================================================
+		-- SECTION / ROW — the grouped, two-column settings-list layout
+		--=====================================================================
+
+		--- Tab:AddSection({ Title, Column }) -> Section
+		--- Column is 1 or 2 (default 1), placing the section in the left or
+		--- right column, mirroring a two-panel settings layout.
+		function Tab:AddSection(sectionCfg)
+			sectionCfg = sectionCfg or {}
+			local columnIndex = sectionCfg.Column or 1
+
+			if not Tab._columnsFrame then
+				Tab._columnsFrame = New("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					LayoutOrder = 999,
+					Parent = page,
+				})
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					FillDirection = Enum.FillDirection.Horizontal,
+					Padding = UDim.new(0, 24),
+					Parent = Tab._columnsFrame,
+				})
+				Tab._columns = {}
+			end
+
+			if not Tab._columns[columnIndex] then
+				local col = New("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(0.5, -12, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					LayoutOrder = columnIndex,
+					Parent = Tab._columnsFrame,
+				})
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					Padding = UDim.new(0, 18),
+					Parent = col,
+				})
+				Tab._columns[columnIndex] = col
+			end
+
+			local column = Tab._columns[columnIndex]
+
+			local sectionFrame = New("Frame", {
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				Parent = column,
+			})
+			New("UIListLayout", {
+				SortOrder = Enum.SortOrder.LayoutOrder,
+				Padding = UDim.new(0, 3),
+				Parent = sectionFrame,
+			})
+
+			if sectionCfg.Title then
+				New("TextLabel", {
+					Text = string.upper(sectionCfg.Title),
+					Font = Enum.Font.GothamBold,
+					TextSize = 11,
+					TextColor3 = theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, 20),
+					LayoutOrder = 0,
+					Parent = sectionFrame,
+				})
+			end
+
+			local Section = { _rowCount = 0 }
+
+			--- Section:AddRow(id, {
+			---   Title, Type = "toggle"|"dropdown"|"slider"|"text",
+			---   Elevated = true,       -- renders as a raised card (use for the section's main on/off row)
+			---   Bold = true,           -- bold label even when not Elevated
+			---   Menu = true,           -- adds a "..." icon before the control (Elevated rows only)
+			---   -- toggle: Default
+			---   -- dropdown: Values, Multi, Default
+			---   -- slider: Default, Min, Max, Rounding, Suffix, Callback
+			---   -- text: Value (static, non-interactive)
+			--- })
+			function Section:AddRow(id, rowCfg)
+				rowCfg = rowCfg or {}
+				local rowType = rowCfg.Type or "toggle"
+				local elevated = rowCfg.Elevated and true or false
+				local rowHeight = elevated and 44 or 30
+
+				Section._rowCount = Section._rowCount + 1
+				local row = New("Frame", {
+					BackgroundColor3 = theme.ElementBackground,
+					BackgroundTransparency = elevated and 0 or 1,
+					Size = UDim2.new(1, 0, 0, rowHeight),
+					LayoutOrder = Section._rowCount,
+					Parent = sectionFrame,
+				})
+				if elevated then
+					Round(row, 8)
+					Pad(row, 12, 0, 12, 0)
+				end
+
+				table.insert(Window._searchRows, { Instance = row, TitleLower = (rowCfg.Title or ""):lower(), TabIndex = index })
+
+				local labelBold = elevated or rowCfg.Bold
+				local rightControlWidth = (rowType == "slider") and 150 or (rowType == "dropdown" and 110 or 38)
+				if rowCfg.Menu then rightControlWidth = rightControlWidth + 24 end
+
+				New("TextLabel", {
+					Text = rowCfg.Title or "",
+					Font = labelBold and Enum.Font.GothamMedium or Enum.Font.Gotham,
+					TextSize = elevated and 13 or 12.5,
+					TextColor3 = labelBold and theme.Text or theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					BackgroundTransparency = 1,
+					Position = UDim2.new(0, elevated and 0 or 0, 0, 0),
+					Size = UDim2.new(1, -(rightControlWidth + 10), 1, 0),
+					Parent = row,
+				})
+
+				local controlHolder = New("Frame", {
+					BackgroundTransparency = 1,
+					AnchorPoint = Vector2.new(1, 0.5),
+					Position = UDim2.new(1, elevated and 0 or 0, 0.5, 0),
+					Size = UDim2.new(0, rightControlWidth, 1, 0),
+					Parent = row,
+				})
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					FillDirection = Enum.FillDirection.Horizontal,
+					HorizontalAlignment = Enum.HorizontalAlignment.Right,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 8),
+					Parent = controlHolder,
+				})
+
+				if rowCfg.Menu then
+					local menuBtn = New("TextButton", {
+						Text = "\226\139\175",
+						Font = Enum.Font.GothamBold,
+						TextSize = 14,
+						TextColor3 = theme.SubText,
+						BackgroundTransparency = 1,
+						Size = UDim2.new(0, 20, 0, 20),
+						LayoutOrder = 1,
+						Parent = controlHolder,
+					})
+					if rowCfg.MenuCallback then
+						menuBtn.MouseButton1Click:Connect(rowCfg.MenuCallback)
+					end
+				end
+
+				if rowType == "toggle" then
+					local track = New("Frame", {
+						BackgroundColor3 = theme.ElementBackgroundHover,
+						Size = UDim2.new(0, 36, 0, 18),
+						LayoutOrder = 2,
+						Parent = controlHolder,
+					})
+					Round(track, 9)
+					local knob = New("Frame", {
+						BackgroundColor3 = theme.Text,
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.new(0, 2, 0.5, 0),
+						Size = UDim2.new(0, 14, 0, 14),
+						Parent = track,
+					})
+					Round(knob, 7)
+					local clickArea = New("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = track })
+
+					local Toggle = { Value = rowCfg.Default or false, Changed = Signal.new() }
+					local function RenderToggle(animate)
+						local on = Toggle.Value
+						local trackColor = on and theme.Accent or theme.ElementBackgroundHover
+						local knobPos = on and UDim2.new(1, -16, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
+						if animate then
+							Tween(track, { BackgroundColor3 = trackColor }, 0.15)
+							Tween(knob, { Position = knobPos }, 0.15)
+						else
+							track.BackgroundColor3 = trackColor
+							knob.Position = knobPos
+						end
+					end
+					RenderToggle(false)
+					function Toggle:SetValue(value)
+						Toggle.Value = value
+						RenderToggle(true)
+						Toggle.Changed:Fire(value)
+						if rowCfg.Callback then rowCfg.Callback(value) end
+					end
+					function Toggle:OnChanged(fn) Toggle.Changed:Connect(fn) end
+					clickArea.MouseButton1Click:Connect(function() Toggle:SetValue(not Toggle.Value) end)
+
+					if id then NovaUI.Options[id] = Toggle end
+					return Toggle
+
+				elseif rowType == "dropdown" then
+					local values = rowCfg.Values or {}
+					local multi = rowCfg.Multi or false
+
+					local ddBtn = New("TextButton", {
+						Text = "",
+						Font = Enum.Font.Gotham,
+						TextSize = 12,
+						TextColor3 = theme.SubText,
+						BackgroundColor3 = theme.ElementBackgroundHover,
+						AutoButtonColor = false,
+						Size = UDim2.new(0, rowCfg.Menu and (rightControlWidth - 24) or rightControlWidth, 0, 26),
+						LayoutOrder = 2,
+						Parent = controlHolder,
+					})
+					Round(ddBtn, 6)
+					Pad(ddBtn, 8, 0, 22, 0)
+					ddBtn.TextXAlignment = Enum.TextXAlignment.Left
+					ddBtn.TextTruncate = Enum.TextTruncate.AtEnd
+
+					do
+						local icon = GetIcon("chevron-down", 10)
+						if icon then
+							icon.AnchorPoint = Vector2.new(1, 0.5)
+							icon.Position = UDim2.new(1, -6, 0.5, 0)
+							icon.ImageColor3 = theme.SubText
+							icon.Parent = ddBtn
+						else
+							New("TextLabel", {
+								Text = "\226\150\190",
+								Font = Enum.Font.Gotham,
+								TextSize = 9,
+								TextColor3 = theme.SubText,
+								BackgroundTransparency = 1,
+								AnchorPoint = Vector2.new(1, 0.5),
+								Position = UDim2.new(1, -6, 0.5, 0),
+								Size = UDim2.new(0, 10, 1, 0),
+								Parent = ddBtn,
+							})
+						end
+					end
+
+					local listFrame = New("Frame", {
+						BackgroundColor3 = theme.ElementBackgroundHover,
+						Visible = false,
+						ZIndex = 20,
+						Size = UDim2.new(0, 180, 0, math.min(#values, 6) * 28 + 8),
+						Parent = row,
+					})
+					Round(listFrame, 6)
+					Stroke(listFrame, theme.Border, 1)
+					local listScroll = New("ScrollingFrame", {
+						BackgroundTransparency = 1,
+						Size = UDim2.new(1, 0, 1, 0),
+						CanvasSize = UDim2.new(0, 0, 0, 0),
+						AutomaticCanvasSize = Enum.AutomaticSize.Y,
+						ScrollBarThickness = 2,
+						BorderSizePixel = 0,
+						ZIndex = 20,
+						Parent = listFrame,
+					})
+					Pad(listScroll, 4)
+					New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = listScroll })
+
+					local Dropdown = { Value = multi and {} or nil, Changed = Signal.new(), _optionButtons = {} }
+					local function LabelForValue()
+						if multi then
+							local names = {}
+							for name, on in pairs(Dropdown.Value or {}) do
+								if on then table.insert(names, name) end
+							end
+							return #names > 0 and table.concat(names, ", ") or "..."
+						else
+							return tostring(Dropdown.Value or "...")
+						end
+					end
+					local function RefreshButton() ddBtn.Text = LabelForValue() end
+					local function RefreshHighlights()
+						for name, btn in pairs(Dropdown._optionButtons) do
+							local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
+							btn.BackgroundTransparency = active and 0.85 or 1
+							btn.TextColor3 = active and theme.Accent or theme.Text
+						end
+					end
+					function Dropdown:OnChanged(fn) Dropdown.Changed:Connect(fn) end
+					function Dropdown:SetValue(value)
+						if multi then
+							local map = {}
+							if typeof(value) == "table" then
+								if value[1] ~= nil then
+									for _, name in ipairs(value) do map[name] = true end
+								else
+									for name, on in pairs(value) do map[name] = on end
+								end
+							end
+							Dropdown.Value = map
+						else
+							Dropdown.Value = value
+						end
+						RefreshButton()
+						RefreshHighlights()
+						Dropdown.Changed:Fire(Dropdown.Value)
+					end
+					for i, name in ipairs(values) do
+						local optBtn = New("TextButton", {
+							Text = tostring(name),
+							Font = Enum.Font.Gotham,
+							TextSize = 12,
+							TextColor3 = theme.Text,
+							TextXAlignment = Enum.TextXAlignment.Left,
+							BackgroundColor3 = theme.Accent,
+							BackgroundTransparency = 1,
+							AutoButtonColor = false,
+							Size = UDim2.new(1, 0, 0, 26),
+							LayoutOrder = i,
+							ZIndex = 21,
+							Parent = listScroll,
+						})
+						Round(optBtn, 4)
+						Pad(optBtn, 8, 0, 8, 0)
+						Dropdown._optionButtons[tostring(name)] = optBtn
+						optBtn.MouseButton1Click:Connect(function()
+							if multi then
+								local key = tostring(name)
+								local newMap = {}
+								for k, v in pairs(Dropdown.Value) do newMap[k] = v end
+								newMap[key] = not newMap[key]
+								Dropdown:SetValue(newMap)
+							else
+								Dropdown:SetValue(tostring(name))
+								listFrame.Visible = false
+							end
+						end)
+					end
+					ddBtn.MouseButton1Click:Connect(function()
+						listFrame.Position = UDim2.new(1, 0, 1, 4)
+						listFrame.AnchorPoint = Vector2.new(1, 0)
+						listFrame.Visible = not listFrame.Visible
+					end)
+					if rowCfg.Default ~= nil then
+						Dropdown:SetValue(rowCfg.Default)
+					else
+						RefreshButton()
+					end
+
+					if id then NovaUI.Options[id] = Dropdown end
+					return Dropdown
+
+				elseif rowType == "slider" then
+					local min, max = rowCfg.Min or 0, rowCfg.Max or 100
+					local rounding = rowCfg.Rounding or 0
+					local suffix = rowCfg.Suffix or ""
+
+					local valueLabel = New("TextLabel", {
+						Text = tostring(rowCfg.Default or min) .. suffix,
+						Font = Enum.Font.Gotham,
+						TextSize = 12,
+						TextColor3 = theme.SubText,
+						TextXAlignment = Enum.TextXAlignment.Right,
+						BackgroundTransparency = 1,
+						Size = UDim2.new(0, 44, 1, 0),
+						LayoutOrder = 2,
+						Parent = controlHolder,
+					})
+
+					local trackWidth = (rowCfg.Menu and (rightControlWidth - 24) or rightControlWidth) - 52
+					local track = New("Frame", {
+						BackgroundColor3 = theme.ElementBackgroundHover,
+						Size = UDim2.new(0, math.max(trackWidth, 50), 0, 4),
+						LayoutOrder = 3,
+						Parent = controlHolder,
+					})
+					Round(track, 2)
+					local fill = New("Frame", { BackgroundColor3 = theme.Accent, Size = UDim2.new(0, 0, 1, 0), Parent = track })
+					Round(fill, 2)
+					local knob = New("Frame", {
+						BackgroundColor3 = theme.Text,
+						AnchorPoint = Vector2.new(0.5, 0.5),
+						Position = UDim2.new(0, 0, 0.5, 0),
+						Size = UDim2.new(0, 11, 0, 11),
+						ZIndex = 2,
+						Parent = track,
+					})
+					Round(knob, 6)
+
+					local Slider = { Value = rowCfg.Default or min, Changed = Signal.new() }
+					local function ApplyRounding(v)
+						if rounding <= 0 then return math.floor(v + 0.5) end
+						local mult = 10 ^ rounding
+						return math.floor(v * mult + 0.5) / mult
+					end
+					local function RenderSlider(v)
+						v = math.clamp(v, min, max)
+						local alpha = (max ~= min) and (v - min) / (max - min) or 0
+						fill.Size = UDim2.new(alpha, 0, 1, 0)
+						knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+						valueLabel.Text = tostring(v) .. suffix
+					end
+					RenderSlider(Slider.Value)
+					function Slider:SetValue(v)
+						v = ApplyRounding(v)
+						Slider.Value = v
+						RenderSlider(v)
+						Slider.Changed:Fire(v)
+						if rowCfg.Callback then rowCfg.Callback(v) end
+					end
+					function Slider:OnChanged(fn) Slider.Changed:Connect(fn) end
+
+					local dragging = false
+					local function UpdateFromInputPos(x)
+						local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+						Slider:SetValue(min + rel * (max - min))
+					end
+					track.InputBegan:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+							dragging = true
+							UpdateFromInputPos(input.Position.X)
+						end
+					end)
+					UserInputService.InputChanged:Connect(function(input)
+						if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+							UpdateFromInputPos(input.Position.X)
+						end
+					end)
+					UserInputService.InputEnded:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+							dragging = false
+						end
+					end)
+
+					if id then NovaUI.Options[id] = Slider end
+					return Slider
+
+				elseif rowType == "text" then
+					New("TextLabel", {
+						Text = rowCfg.Value or "",
+						Font = Enum.Font.Gotham,
+						TextSize = 12,
+						TextColor3 = theme.SubText,
+						TextXAlignment = Enum.TextXAlignment.Right,
+						BackgroundTransparency = 1,
+						LayoutOrder = 2,
+						Size = UDim2.new(0, rightControlWidth, 1, 0),
+						Parent = controlHolder,
+					})
+					return nil
+				end
+			end
+
+			return Section
 		end
 
 		self._tabs[index] = Tab
