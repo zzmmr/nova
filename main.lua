@@ -304,6 +304,34 @@ local function PopIn(frame)
 	Tween(scale, { Scale = 1 }, 0.12, EASE)
 end
 
+-- Like PopIn, but only the height animates in — the frame spawns already at
+-- its full final width and grows downward on Y alone, instead of scaling
+-- both axes uniformly via UIScale. `frame` must have ClipsDescendants = true
+-- (its children shouldn't render outside the still-growing bounds).
+-- Handles both a manually-sized frame (Size already set to the target) and
+-- an AutomaticSize.Y one (SelectorList's height comes from its content, not
+-- a fixed number) — for the latter, it reads the natural settled height,
+-- takes over manually for the grow animation, then hands sizing back to
+-- AutomaticSize once the tween finishes.
+local function PopInHeight(frame)
+	local targetSize = frame.Size
+	local autoSize = frame.AutomaticSize
+	if autoSize ~= Enum.AutomaticSize.None then
+		local naturalHeight = frame.AbsoluteSize.Y
+		frame.AutomaticSize = Enum.AutomaticSize.None
+		frame.Size = UDim2.new(targetSize.X.Scale, targetSize.X.Offset, 0, 0)
+		local tw = Tween(frame, { Size = UDim2.new(targetSize.X.Scale, targetSize.X.Offset, 0, naturalHeight) }, 0.12, EASE)
+		tw.Completed:Connect(function()
+			if frame.Parent then
+				frame.AutomaticSize = autoSize
+			end
+		end)
+	else
+		frame.Size = UDim2.new(targetSize.X.Scale, targetSize.X.Offset, 0, 0)
+		Tween(frame, { Size = targetSize }, 0.12, EASE)
+	end
+end
+
 -- Subtle fade + small rise-in for newly created rows/cards. No bounce.
 local function FadeSlideIn(inst, delayTime)
 	local originalPosition = inst.Position
@@ -1072,7 +1100,11 @@ function NovaUI:CreateWindow(config)
 
 		popup.Position = UDim2.fromOffset(x, anchorPos.Y + anchorSize.Y + (opts.Gap or 6))
 		popup.Visible = true
-		PopIn(popup)
+		if opts.GrowHeight then
+			PopInHeight(popup)
+		else
+			PopIn(popup)
+		end
 		PopupCatcher.Visible = true
 
 		currentPopup = popup
@@ -1327,6 +1359,7 @@ function NovaUI:CreateWindow(config)
 		BackgroundColor3 = theme.PopupBackground,
 		BackgroundTransparency = 0,
 		Visible = false,
+		ClipsDescendants = true,
 		Size = UDim2.new(0, 156, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = Overlay,
@@ -1887,7 +1920,7 @@ function NovaUI:CreateWindow(config)
 	end
 
 	SelectorPill.MouseButton1Click:Connect(function()
-		OpenPopup(SelectorList, SelectorPill, { Align = "left" })
+		OpenPopup(SelectorList, SelectorPill, { Align = "left", GrowHeight = true })
 	end)
 	SaveConfigBtn.MouseButton1Click:Connect(function()
 		ConfigSelector.Save:Fire(ConfigSelector.Value, NovaUI:ExportConfigJSON())
@@ -2672,6 +2705,7 @@ function NovaUI:CreateWindow(config)
 					BackgroundColor3 = theme.PopupBackground,
 					BackgroundTransparency = 0,
 					Visible = false,
+					ClipsDescendants = true,
 					Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(CountUniqueNames(values), 6) * 28 + 8),
 					Parent = Overlay,
 				})
@@ -2832,6 +2866,7 @@ function NovaUI:CreateWindow(config)
 				ddBtn.MouseButton1Click:Connect(function()
 					OpenPopup(listFrame, ddBtn, {
 						Align = "right",
+						GrowHeight = true,
 						OnClose = function()
 							Tween(chevron, { Rotation = 0 }, 0.12)
 						end,
