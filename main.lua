@@ -2480,6 +2480,22 @@ function NovaUI:CreateWindow(config)
 				local multi = cfg.Multi or false
 				local controlWidth = 130
 
+				-- Values are matched/displayed by tostring(name), so entries
+				-- that stringify the same (duplicate names, or duplicate
+				-- instances with the same .Name) collapse into a single
+				-- option rather than listing repeats.
+				local function CountUniqueNames(list)
+					local seen, count = {}, 0
+					for _, name in ipairs(list) do
+						local key = tostring(name)
+						if not seen[key] then
+							seen[key] = true
+							count = count + 1
+						end
+					end
+					return count
+				end
+
 				local _, controlHolder = CreateRow(cfg, controlWidth)
 
 				local ddBtn = New("TextButton", {
@@ -2543,7 +2559,7 @@ function NovaUI:CreateWindow(config)
 					BackgroundColor3 = theme.PopupBackground,
 					BackgroundTransparency = 0,
 					Visible = false,
-					Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(#values, 6) * 28 + 8),
+					Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(CountUniqueNames(values), 6) * 28 + 8),
 					Parent = Overlay,
 				})
 				Round(listFrame, 6)
@@ -2662,7 +2678,9 @@ function NovaUI:CreateWindow(config)
 					return optBtn
 				end
 				for i, name in ipairs(values) do
-					CreateOptionButton(name, i)
+					if not Dropdown._optionButtons[tostring(name)] then
+						CreateOptionButton(name, i)
+					end
 				end
 
 				-- Dropdown:SetOptions(list) — replaces the whole option list
@@ -2679,9 +2697,11 @@ function NovaUI:CreateWindow(config)
 						hoverTweens[key] = nil
 					end
 					for i, name in ipairs(values) do
-						CreateOptionButton(name, i)
+						if not Dropdown._optionButtons[tostring(name)] then
+							CreateOptionButton(name, i)
+						end
 					end
-					listFrame.Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(#values, 6) * 28 + 8)
+					listFrame.Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(CountUniqueNames(values), 6) * 28 + 8)
 					if multi then
 						local survivors = {}
 						for name, on in pairs(Dropdown.Value or {}) do
