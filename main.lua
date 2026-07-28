@@ -112,17 +112,23 @@ local function New(className, props, children)
 	return inst
 end
 
+-- Global multiplier applied to every radius that passes through Round() —
+-- turn the knob here to make the whole UI's corners sharper/rounder at once
+-- instead of touching every individual Round(...) call site.
+local CORNER_SCALE = 0.65
+
 -- `corners`, if given, overrides individual corners on top of the uniform
 -- `radius` — e.g. Round(Sidebar, 14, { TopRight = 0, BottomRight = 0 }) for
 -- a panel that's only rounded on the outer (left) edge. Keys: TopLeft,
--- TopRight, BottomLeft, BottomRight.
+-- TopRight, BottomLeft, BottomRight. All radii (uniform and per-corner) are
+-- scaled by CORNER_SCALE; 0 stays 0 either way.
 local function Round(inst, radius, corners)
-	local corner = New("UICorner", { CornerRadius = UDim.new(0, radius or 6), Parent = inst })
+	local corner = New("UICorner", { CornerRadius = UDim.new(0, math.floor((radius or 6) * CORNER_SCALE)), Parent = inst })
 	if corners then
-		if corners.TopLeft ~= nil then corner.TopLeftRadius = UDim.new(0, corners.TopLeft) end
-		if corners.TopRight ~= nil then corner.TopRightRadius = UDim.new(0, corners.TopRight) end
-		if corners.BottomLeft ~= nil then corner.BottomLeftRadius = UDim.new(0, corners.BottomLeft) end
-		if corners.BottomRight ~= nil then corner.BottomRightRadius = UDim.new(0, corners.BottomRight) end
+		if corners.TopLeft ~= nil then corner.TopLeftRadius = UDim.new(0, math.floor(corners.TopLeft * CORNER_SCALE)) end
+		if corners.TopRight ~= nil then corner.TopRightRadius = UDim.new(0, math.floor(corners.TopRight * CORNER_SCALE)) end
+		if corners.BottomLeft ~= nil then corner.BottomLeftRadius = UDim.new(0, math.floor(corners.BottomLeft * CORNER_SCALE)) end
+		if corners.BottomRight ~= nil then corner.BottomRightRadius = UDim.new(0, math.floor(corners.BottomRight * CORNER_SCALE)) end
 	end
 	return inst
 end
@@ -158,6 +164,34 @@ local function Tween(inst, props, time, style, dir)
 	local tw = TweenService:Create(inst, info, props)
 	tw:Play()
 	return tw
+end
+
+-- Fades `root` itself and every descendant's visible-transparency property
+-- (BackgroundTransparency, TextTransparency, ImageTransparency, and any
+-- UIStroke's Transparency) to fully invisible. Without this, closing
+-- something like Window:Dialog by only tweening the outer overlay/card
+-- leaves child text/button-backgrounds/strokes fully opaque right up until
+-- the instance is destroyed, so they visibly "pop" out instead of fading.
+local function FadeOutTree(root, duration)
+	duration = duration or 0.12
+	for _, inst in ipairs(root:GetDescendants()) do
+		if inst:IsA("GuiObject") and inst.BackgroundTransparency < 1 then
+			Tween(inst, { BackgroundTransparency = 1 }, duration)
+		end
+		if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+			if inst.TextTransparency < 1 then
+				Tween(inst, { TextTransparency = 1 }, duration)
+			end
+		end
+		if inst:IsA("ImageLabel") or inst:IsA("ImageButton") then
+			if inst.ImageTransparency < 1 then
+				Tween(inst, { ImageTransparency = 1 }, duration)
+			end
+		end
+		if inst:IsA("UIStroke") and inst.Transparency < 1 then
+			Tween(inst, { Transparency = 1 }, duration)
+		end
+	end
 end
 
 -- IMPORTANT: the movement/end tracking below is on the GLOBAL
@@ -826,9 +860,10 @@ function NovaUI:CreateWindow(config)
 		ClipsDescendants = true,
 		Parent = ScreenGui,
 	})
-	Round(Main, 14)
+	-- Bottom-right squared off since that's where the resize grip sits.
+	Round(Main, 14, { BottomRight = 0 })
 	Stroke(Main, theme.Border, 1)
-	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 20 })
+	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 14, Blur = 28 })
 	local mainScale = New("UIScale", { Scale = 0.97, Parent = Main })
 
 	-- Opening animation: a restrained fade + tiny scale-up (no bounce).
@@ -836,7 +871,7 @@ function NovaUI:CreateWindow(config)
 		local targetAcrylicTransparency = config.Acrylic and 0.06 or 0
 		Tween(mainScale, { Scale = 1 }, 0.18, EASE_SOFT)
 		Tween(Main, { BackgroundTransparency = targetAcrylicTransparency }, 0.2)
-		Tween(Shadow, { Transparency = 0.5 }, 0.25)
+		Tween(Shadow, { Transparency = 0.15 }, 0.25)
 	end
 
 	-- Bottom-right resize grip. High ZIndex so it's always grabbable above
@@ -1958,7 +1993,12 @@ function NovaUI:CreateWindow(config)
 			btn.MouseButton1Click:Connect(function()
 				Tween(overlay, { BackgroundTransparency = 1 }, 0.12)
 				Tween(boxScale, { Scale = 0.96 }, 0.12)
-				Tween(box, { BackgroundTransparency = 1 }, 0.1)
+				Tween(box, { BackgroundTransparency = 1 }, 0.12)
+				-- Fade every descendant too (text, button backgrounds/text,
+				-- strokes, the input field's stroke, etc.) — otherwise
+				-- everything but the card background stays fully opaque and
+				-- visibly "pops" out when overlay:Destroy() fires.
+				FadeOutTree(box, 0.12)
 				task.delay(0.12, function()
 					overlay:Destroy()
 				end)
@@ -2523,6 +2563,14 @@ function NovaUI:CreateWindow(config)
 				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = listScroll })
 
 				local Dropdown = { Value = multi and {} or nil, Changed = Signal.new(), _optionButtons = {} }
+				-- Tracks the in-flight hover Tween per option (keyed by name) so a
+				-- quick mouse pass across several options can't leave stray tweens
+				-- running: without cancelling, a tween started on MouseEnter keeps
+				-- animating toward the highlighted transparency even after
+				-- MouseLeave has already reset the property instantly, so it
+				-- silently re-highlights a split second later — with several
+				-- options passed over quickly, they can all end up stuck lit.
+				local hoverTweens = {}
 				local function LabelForValue()
 					if multi then
 						local names = {}
@@ -2537,6 +2585,10 @@ function NovaUI:CreateWindow(config)
 				local function RefreshButton() ddLabel.Text = LabelForValue() end
 				local function RefreshHighlights()
 					for name, btn in pairs(Dropdown._optionButtons) do
+						if hoverTweens[name] then
+							hoverTweens[name]:Cancel()
+							hoverTweens[name] = nil
+						end
 						local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
 						btn.BackgroundTransparency = active and 0.85 or 1
 						btn.TextColor3 = active and theme.Accent or theme.Text
@@ -2579,12 +2631,20 @@ function NovaUI:CreateWindow(config)
 					Round(optBtn, 4)
 					Pad(optBtn, 8, 0, 8, 0)
 					Dropdown._optionButtons[tostring(name)] = optBtn
+					local optKey = tostring(name)
 					optBtn.MouseEnter:Connect(function()
-						if not (multi and Dropdown.Value[tostring(name)]) and Dropdown.Value ~= tostring(name) then
-							Tween(optBtn, { BackgroundTransparency = 0.92 }, 0.08)
+						if hoverTweens[optKey] then hoverTweens[optKey]:Cancel() end
+						if not (multi and Dropdown.Value[optKey]) and Dropdown.Value ~= optKey then
+							hoverTweens[optKey] = Tween(optBtn, { BackgroundTransparency = 0.92 }, 0.08)
 						end
 					end)
-					optBtn.MouseLeave:Connect(function() RefreshHighlights() end)
+					optBtn.MouseLeave:Connect(function()
+						if hoverTweens[optKey] then
+							hoverTweens[optKey]:Cancel()
+							hoverTweens[optKey] = nil
+						end
+						RefreshHighlights()
+					end)
 					optBtn.MouseButton1Click:Connect(function()
 						if multi then
 							local key = tostring(name)
