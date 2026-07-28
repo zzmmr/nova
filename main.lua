@@ -1397,7 +1397,32 @@ function NovaUI:CreateWindow(config)
 	Window._searchText = ""
 
 	CloseBtn.Instance.MouseButton1Click:Connect(function()
-		Window:Destroy()
+		-- Set ConfirmClose = false in CreateWindow({...}) to skip this and
+		-- close immediately instead.
+		if config.ConfirmClose == false then
+			Window:Destroy()
+			return
+		end
+		Window:Dialog({
+			Title = "Close window?",
+			Content = "This will close " .. (config.Title or "the UI") .. ".",
+			Buttons = {
+				{ Title = "Cancel", Callback = function() end },
+				{
+					Title = "Close",
+					Callback = function()
+						-- Window:Destroy() is instant (no fade of its own) and
+						-- tears down the whole ScreenGui, which is also still
+						-- mid-fade-out as this dialog closes — destroying
+						-- immediately would cut that fade short and yank the
+						-- confirm dialog itself off-screen. Let it finish first.
+						task.delay(0.13, function()
+							Window:Destroy()
+						end)
+					end,
+				},
+			},
+		})
 	end)
 
 	MinimizeBtn.Instance.MouseButton1Click:Connect(function()
