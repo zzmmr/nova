@@ -68,18 +68,25 @@ local LocalPlayer = Players.LocalPlayer
 --=============================================================================
 
 local Themes = {
+	-- Elevation ladder, darkest to lightest: Background (the window itself)
+	-- < Divider/PopupBackground (subtle separators + popups, barely lifted)
+	-- < SecondaryBackground (elevated cards: dialogs, notifications — reads
+	-- as "raised" because it's lighter than what it floats on, same logic
+	-- as any dark-theme elevation system) < ElementBackground (buttons/rows
+	-- resting on the window) < ElementBackgroundHover < Border (has to stay
+	-- visible against every surface above it, so it sits at the top).
 	Dark = {
 		Accent = Color3.fromRGB(70, 130, 255),
 		AccentHover = Color3.fromRGB(95, 150, 255),
-		Background = Color3.fromRGB(15, 15, 19),
-		SecondaryBackground = Color3.fromRGB(19, 19, 24),
-		ElementBackground = Color3.fromRGB(26, 26, 32),
-		ElementBackgroundHover = Color3.fromRGB(34, 34, 41),
-		PopupBackground = Color3.fromRGB(30, 30, 37),
+		Background = Color3.fromRGB(34, 35, 41),
+		SecondaryBackground = Color3.fromRGB(42, 44, 50),
+		ElementBackground = Color3.fromRGB(44, 46, 52),
+		ElementBackgroundHover = Color3.fromRGB(54, 56, 63),
+		PopupBackground = Color3.fromRGB(40, 42, 48),
 		Text = Color3.fromRGB(235, 236, 240),
 		SubText = Color3.fromRGB(140, 142, 155),
-		Border = Color3.fromRGB(40, 40, 48),
-		Divider = Color3.fromRGB(36, 36, 43),
+		Border = Color3.fromRGB(58, 60, 68),
+		Divider = Color3.fromRGB(40, 41, 47),
 	},
 }
 -- Sidebar background: a matte near-black blended faintly toward Accent, so
@@ -130,6 +137,19 @@ local function Round(inst, radius, corners)
 		if corners.BottomLeft ~= nil then corner.BottomLeftRadius = UDim.new(0, math.floor(corners.BottomLeft * CORNER_SCALE)) end
 		if corners.BottomRight ~= nil then corner.BottomRightRadius = UDim.new(0, math.floor(corners.BottomRight * CORNER_SCALE)) end
 	end
+	return inst
+end
+
+-- For toggle/slider tracks, knobs, and other elements that are meant to
+-- stay a perfect pill/circle no matter what: CORNER_SCALE shrinking Round()'s
+-- radius below half the element's own height is exactly what was breaking
+-- these (a toggle track's radius has to equal half its height to read as a
+-- capsule, and shrinking that radius by 0.65x turns it into a visibly
+-- squared-off rounded rect instead). Scale-based CornerRadius (0.5, 0) always
+-- rounds relative to the smaller dimension, so it stays fully round
+-- regardless of CORNER_SCALE or the element's exact pixel size.
+local function Pill(inst)
+	New("UICorner", { CornerRadius = UDim.new(0.5, 0), Parent = inst })
 	return inst
 end
 
@@ -243,12 +263,12 @@ local function AddShadow(parent, opts)
 	return New("UIShadow", {
 		Color = opts.Color or Color3.new(0, 0, 0),
 		Transparency = opts.Transparency or 0.6,
-		Offset = UDim2.fromOffset(opts.OffsetX or 0, opts.OffsetY or 6),
-		Spread = opts.Spread or UDim2.fromScale(0, 0),
+		Offset = UDim2.fromOffset(0, 0),
+		Spread = UDim2.fromScale(0, 0),
 		-- BlurRadius is a real GPU blur post-effect — the priciest part of a
 		-- shadow. ReducedEffects drops it to 0 (a flat, cheap offset shadow)
 		-- and disables the shadow outright, for lower-end hardware.
-		BlurRadius = UDim.new(0, NovaUI.ReducedEffects and 0 or (opts.Blur or 24)),
+		BlurRadius = UDim.new(0, 24),
 		ZIndex = opts.ZIndex or 0,
 		Enabled = (opts.Enabled ~= false) and not NovaUI.ReducedEffects,
 		Parent = parent,
@@ -556,6 +576,11 @@ local function SetButtonIcon(button, iconName, fallbackText, size, color)
 				button.TextColor3 = c
 			end
 		end,
+		-- Exposed so callers that need more than SetColor (e.g. tweening
+		-- transparency for a hover-reveal effect) don't have to duplicate
+		-- the icon-vs-fallback-text branching themselves.
+		Instance = icon or button,
+		Property = icon and "ImageTransparency" or "TextTransparency",
 	}
 end
 
@@ -580,7 +605,7 @@ local function EnsureNotifHolder()
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(1, 1),
 		Position = UDim2.new(1, -16, 1, -16),
-		Size = UDim2.new(0, 300, 1, -32),
+		Size = UDim2.new(0, 320, 1, -32),
 		Parent = gui,
 	})
 
@@ -623,10 +648,10 @@ function NovaUI:Notify(config)
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = card,
 	})
-	Pad(content, 14, 12, 12, 14)
+	Pad(content, 16, 14, 16, 14)
 	New("UIListLayout", {
 		SortOrder = Enum.SortOrder.LayoutOrder,
-		Padding = UDim.new(0, 2),
+		Padding = UDim.new(0, 6),
 		Parent = content,
 	})
 
@@ -704,19 +729,25 @@ function NovaUI:Notify(config)
 			LayoutOrder = 99,
 			Parent = content,
 		})
-		Round(progressTrack, 2)
+		Pill(progressTrack)
 		progressFill = New("Frame", {
 			BackgroundColor3 = theme.Accent,
 			Size = UDim2.new(1, 0, 1, 0),
 			Parent = progressTrack,
 		})
-		Round(progressFill, 2)
+		Pill(progressFill)
 	end
 
 	local function Dismiss()
 		if not (card and card.Parent) then return end
 		Tween(card, { Position = UDim2.new(1, 24, 0, 0), BackgroundTransparency = 1 }, 0.16, EASE_SOFT)
 		Tween(shadow, { Transparency = 1 }, 0.16)
+		-- Fade every descendant too (title/content/subcontent text, the
+		-- card's own border stroke, the close icon, the accent bar and
+		-- progress bar backgrounds) — otherwise only the card's own
+		-- background fades and everything else stays opaque until
+		-- card:Destroy() cuts it off abruptly.
+		FadeOutTree(card, 0.16)
 		task.delay(0.16, function()
 			if card then card:Destroy() end
 		end)
@@ -838,6 +869,41 @@ function NovaUI:CreateWindow(config)
 			Instance = btn,
 			SetIcon = function(name, fb)
 				state.handle = SetButtonIcon(btn, name, fb, iconSize or 14, theme.SubText)
+			end,
+			SetColor = function(c)
+				state.handle.SetColor(c)
+			end,
+		}
+	end
+
+	-- macOS-style traffic-light chrome button: a small solid-color dot
+	-- (always visible, not transparent-until-hover like MakeIconButton)
+	-- that reveals a darker glyph on hover — same feel as the real
+	-- close/minimize/zoom dots. `color` is also what the hover glyph is
+	-- derived from (darkened), so it always reads against its own dot.
+	local function MakeTrafficLightButton(parent, color, iconName, fallbackGlyph, iconSize)
+		local dot = New("TextButton", {
+			Text = "",
+			BackgroundColor3 = color,
+			AutoButtonColor = false,
+			Size = UDim2.new(0, 14, 0, 14),
+			Parent = parent,
+		})
+		Pill(dot)
+		local glyphColor = color:Lerp(Color3.new(0, 0, 0), 0.55)
+		local state = { handle = SetButtonIcon(dot, iconName, fallbackGlyph, iconSize or 9, glyphColor) }
+		state.handle.Instance[state.handle.Property] = 1
+		dot.MouseEnter:Connect(function()
+			Tween(state.handle.Instance, { [state.handle.Property] = 0 }, 0.1)
+		end)
+		dot.MouseLeave:Connect(function()
+			Tween(state.handle.Instance, { [state.handle.Property] = 1 }, 0.1)
+		end)
+		return {
+			Instance = dot,
+			SetIcon = function(name, fb)
+				state.handle = SetButtonIcon(dot, name, fb, iconSize or 9, glyphColor)
+				state.handle.Instance[state.handle.Property] = 1
 			end,
 			SetColor = function(c)
 				state.handle.SetColor(c)
@@ -1034,17 +1100,16 @@ function NovaUI:CreateWindow(config)
 		Parent = Sidebar,
 	})
 	local logoMark = New("Frame", {
-		BackgroundColor3 = theme.Accent,
+		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.new(0, 32, 0, 32),
+		Size = UDim2.new(0, 40, 0, 40),
 		Parent = LogoBox,
 	})
-	Round(logoMark, 9)
 	-- config.Logo swaps the default "first letter of the title" mark for a
 	-- real image — an icon name from the icon table, a raw asset id, or an
 	-- rbxassetid://... string all work (same as any other icon input).
-	local logoIcon = config.Logo and GetIcon(config.Logo, 20)
+	local logoIcon = config.Logo and GetIcon(config.Logo, 32)
 	if logoIcon then
 		logoIcon.AnchorPoint = Vector2.new(0.5, 0.5)
 		logoIcon.Position = UDim2.new(0.5, 0, 0.5, 0)
@@ -1285,7 +1350,7 @@ function NovaUI:CreateWindow(config)
 		Parent = TopBarRow,
 	})
 	Round(CreateConfigBtn, 8)
-	local createConfigIconHandle = SetButtonIcon(CreateConfigBtn, "file-plus-corner", "+", 14, theme.SubText)
+	local createConfigIconHandle = SetButtonIcon(CreateConfigBtn, "file-down", "+", 14, theme.SubText)
 	AddHoverFade(CreateConfigBtn, 0, 0.4)
 	CreateConfigBtn.MouseEnter:Connect(function()
 		createConfigIconHandle.SetColor(theme.Text)
@@ -1334,12 +1399,13 @@ function NovaUI:CreateWindow(config)
 	New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = TopBarSpacer })
 
 	-- Window chrome (minimize/fullscreen/close) — small, flush to the right
-	-- edge of the top bar (TopBarSpacer above pushes it there).
-	-- All three render as real icons via MakeIconButton, falling back
-	-- to text glyphs automatically if no icon provider is hooked up.
+	-- edge of the top bar (TopBarSpacer above pushes it there). Styled as
+	-- macOS-style traffic-light dots: always-visible solid color, with a
+	-- dark glyph that only shows up on hover (same as real macOS window
+	-- controls) instead of MakeIconButton's transparent-until-hover look.
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 82, 1, 0),
+		Size = UDim2.new(0, 58, 1, 0),
 		LayoutOrder = 6,
 		ZIndex = 2,
 		Parent = TopBarRow,
@@ -1349,24 +1415,21 @@ function NovaUI:CreateWindow(config)
 		FillDirection = Enum.FillDirection.Horizontal,
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0, 4),
+		Padding = UDim.new(0, 8),
 		Parent = ChromeRow,
 	})
 
-	local MinimizeBtn = MakeIconButton(ChromeRow, 24, "minimize-2", "\226\128\148", 13)
+	local MinimizeBtn = MakeTrafficLightButton(ChromeRow, Color3.fromRGB(255, 189, 46), "minus", "\226\128\148")
 	MinimizeBtn.Instance.LayoutOrder = 1
 	AttachTooltip(MinimizeBtn.Instance, "Minimize")
 
-	local FullscreenBtn = MakeIconButton(ChromeRow, 24, "expand", "\226\150\162", 13)
+	local FullscreenBtn = MakeTrafficLightButton(ChromeRow, Color3.fromRGB(39, 201, 63), "maximize-2", "\226\150\162")
 	FullscreenBtn.Instance.LayoutOrder = 2
 	AttachTooltip(FullscreenBtn.Instance, "Fullscreen")
 
-	local CloseBtn = MakeIconButton(ChromeRow, 24, "x", "\226\156\149", 13)
+	local CloseBtn = MakeTrafficLightButton(ChromeRow, Color3.fromRGB(255, 95, 86), "x", "\226\156\149")
 	CloseBtn.Instance.LayoutOrder = 3
 	AttachTooltip(CloseBtn.Instance, "Close")
-	CloseBtn.Instance.MouseEnter:Connect(function()
-		CloseBtn.SetColor(Color3.fromRGB(255, 100, 100))
-	end)
 
 	MakeDraggable(Main, LogoBox, Track)
 	MakeDraggable(Main, TopBarSpacer, Track)
@@ -1410,6 +1473,7 @@ function NovaUI:CreateWindow(config)
 				{ Title = "Cancel", Callback = function() end },
 				{
 					Title = "Close",
+					Main = true,
 					Callback = function()
 						-- Window:Destroy() is instant (no fade of its own) and
 						-- tears down the whole ScreenGui, which is also still
@@ -1477,7 +1541,7 @@ function NovaUI:CreateWindow(config)
 					self._cameraConn:Disconnect()
 					self._cameraConn = nil
 				end
-				FullscreenBtn.SetIcon("expand", "\226\150\162")
+				FullscreenBtn.SetIcon("maximize-2", "\226\150\162")
 				self._preMinimizeSize = self._savedSize or self._fullSize
 			else
 				self._preMinimizeSize = Main.Size
@@ -1531,7 +1595,7 @@ function NovaUI:CreateWindow(config)
 	--- Toggles the window to fill (most of) the screen and back, tracking the
 	--- camera's ViewportSize live so Main is resized whenever the game
 	--- window/resolution changes while fullscreen is active. Swaps the chrome
-	--- icon between "expand" and "shrink".
+	--- icon between "maximize-2" and "shrink".
 	function Window:ToggleFullscreen()
 		self._fullscreen = not self._fullscreen
 		if self._fullscreen then
@@ -1587,7 +1651,7 @@ function NovaUI:CreateWindow(config)
 				Size = self._savedSize or self._fullSize,
 				Position = self._savedPosition or UDim2.new(0.5, 0, 0.5, 0),
 			}, 0.2, EASE_SOFT)
-			FullscreenBtn.SetIcon("expand", "\226\150\162")
+			FullscreenBtn.SetIcon("maximize-2", "\226\150\162")
 		end
 	end
 
@@ -1835,6 +1899,7 @@ function NovaUI:CreateWindow(config)
 				{ Title = "Cancel", Callback = function() end },
 				{
 					Title = "Create",
+					Main = true,
 					Callback = function(name)
 						name = name and name:gsub("^%s+", ""):gsub("%s+$", "")
 						if not name or name == "" then return end
@@ -1875,19 +1940,22 @@ function NovaUI:CreateWindow(config)
 			end
 			Tween(t._button, { BackgroundTransparency = active and 0.85 or 1 }, 0.1)
 			if t._icon then
-				Tween(t._icon, { ImageColor3 = active and theme.Accent or theme.SubText }, 0.1)
+				Tween(t._icon, { ImageColor3 = active and theme.Text or theme.SubText }, 0.1)
 			end
 			if t._fallbackLabel then
-				t._fallbackLabel.TextColor3 = active and theme.Accent or theme.SubText
+				t._fallbackLabel.TextColor3 = active and theme.Text or theme.SubText
 			end
 		end
 		ApplySearchFilter()
 	end
 
 	--- Window:Dialog({ Title, Content, Input = { Placeholder, Default },
-	---   Buttons = {{Title, Callback}, ...} })
+	---   Buttons = {{Title, Callback, Main}, ...} })
 	--- If Input is given, every button's Callback is invoked with the
 	--- input box's current text as its only argument (nil otherwise).
+	--- Buttons are the flat/ghost secondary style by default; set
+	--- Main = true on (usually) one button to render it as the primary
+	--- solid-accent action instead — same fill as Section:AddButton.
 	function Window:Dialog(cfg)
 		local overlay = New("Frame", {
 			BackgroundColor3 = Color3.new(0, 0, 0),
@@ -2004,16 +2072,23 @@ function NovaUI:CreateWindow(config)
 		})
 
 		for _, btnCfg in ipairs(cfg.Buttons or {}) do
-			-- Flat "ghost" style: a bordered pill that fades toward
-			-- see-through on hover instead of scaling up or swapping fill
-			-- color — the border brightening to the accent color is what
-			-- reads as the hover state once the fill has faded.
+			-- Main = true renders the same solid-accent fill as
+			-- Section:AddButton, for the dialog's primary action. Every
+			-- other button stays the flat/ghost secondary style: a
+			-- bordered pill that just fades more transparent on hover —
+			-- ElementBackgroundHover (not the idle ElementBackground) on
+			-- purpose, since it sits close in brightness to
+			-- SecondaryBackground (the card's own fill), so a button using
+			-- ElementBackground barely reads as distinct from the card.
+			-- No more hover-tinted border on the secondary style — the
+			-- fade alone is the hover cue now.
+			local isMain = btnCfg.Main == true
 			local btn = New("TextButton", {
 				Text = btnCfg.Title,
 				Font = Enum.Font.GothamBold,
 				TextSize = 13,
-				TextColor3 = theme.Text,
-				BackgroundColor3 = theme.ElementBackground,
+				TextColor3 = isMain and Color3.new(1, 1, 1) or theme.Text,
+				BackgroundColor3 = isMain and theme.Accent or theme.ElementBackgroundHover,
 				AutoButtonColor = false,
 				AutomaticSize = Enum.AutomaticSize.X,
 				Size = UDim2.new(0, 0, 1, 0),
@@ -2023,14 +2098,10 @@ function NovaUI:CreateWindow(config)
 			New("UISizeConstraint", { MinSize = Vector2.new(76, 0), Parent = btn })
 			Pad(btn, 16, 0, 16, 0)
 			Round(btn, 7)
-			local btnStroke = Stroke(btn, theme.Border, 1)
-			AddHoverFade(btn, 0, 0.5)
-			btn.MouseEnter:Connect(function()
-				Tween(btnStroke, { Color = theme.Accent }, 0.1)
-			end)
-			btn.MouseLeave:Connect(function()
-				Tween(btnStroke, { Color = theme.Border }, 0.1)
-			end)
+			if not isMain then
+				Stroke(btn, theme.Border, 1)
+			end
+			AddHoverFade(btn, 0, isMain and 0.3 or 0.5)
 			btn.MouseButton1Click:Connect(function()
 				Tween(overlay, { BackgroundTransparency = 1 }, 0.12)
 				Tween(boxScale, { Scale = 0.96 }, 0.12)
@@ -2129,8 +2200,8 @@ function NovaUI:CreateWindow(config)
 
 		if tabIndex == 1 then
 			button.BackgroundTransparency = 0.85
-			if iconImage then iconImage.ImageColor3 = theme.Accent end
-			if fallbackLabel then fallbackLabel.TextColor3 = theme.Accent end
+			if iconImage then iconImage.ImageColor3 = theme.Text end
+			if fallbackLabel then fallbackLabel.TextColor3 = theme.Text end
 		end
 
 		--=====================================================================
@@ -2386,7 +2457,7 @@ function NovaUI:CreateWindow(config)
 					Size = UDim2.new(0, 36, 0, 18),
 					Parent = controlHolder,
 				})
-				Round(track, 9)
+				Pill(track)
 				local knob = New("Frame", {
 					BackgroundColor3 = theme.Text,
 					AnchorPoint = Vector2.new(0, 0.5),
@@ -2394,7 +2465,7 @@ function NovaUI:CreateWindow(config)
 					Size = UDim2.new(0, 14, 0, 14),
 					Parent = track,
 				})
-				Round(knob, 7)
+				Pill(knob)
 				local clickArea = New("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = track })
 
 				local Toggle = { Value = cfg.Default or false, Changed = Signal.new() }
@@ -2452,9 +2523,9 @@ function NovaUI:CreateWindow(config)
 					LayoutOrder = 2,
 					Parent = controlHolder,
 				})
-				Round(track, 2)
+				Pill(track)
 				local fill = New("Frame", { BackgroundColor3 = theme.Accent, Size = UDim2.new(0, 0, 1, 0), Parent = track })
-				Round(fill, 2)
+				Pill(fill)
 				local knob = New("Frame", {
 					BackgroundColor3 = theme.Text,
 					AnchorPoint = Vector2.new(0.5, 0.5),
@@ -2463,7 +2534,7 @@ function NovaUI:CreateWindow(config)
 					ZIndex = 2,
 					Parent = track,
 				})
-				Round(knob, 6)
+				Pill(knob)
 
 				local Slider = { Value = cfg.Default or min, Changed = Signal.new() }
 				local function ApplyRounding(v)
@@ -2884,7 +2955,7 @@ function NovaUI:CreateWindow(config)
 					ZIndex = 2,
 					Parent = svBox,
 				})
-				Round(svCursor, 5)
+				Pill(svCursor)
 				Stroke(svCursor, Color3.new(0, 0, 0), 2)
 
 				local hueBar = New("Frame", {
@@ -3039,6 +3110,13 @@ function NovaUI:CreateWindow(config)
 			end
 
 			--- Section:AddKeybind(id, { Title, Description, Mode, Default, Elevated, Callback, ChangedCallback })
+			--- Two separate signals, easy to mix up since they're both
+			--- "changed": Keybind:OnChanged(fn) fires with the live true/false
+			--- pressed state (Toggle flip, Hold press/release, Always press) —
+			--- same value `Callback` gets. Keybind:OnKeybindChanged(fn) fires
+			--- with the new key name (e.g. "F") only when the BOUND KEY itself
+			--- is changed — clicking the button and pressing a new key, or
+			--- calling :SetValue(key) in code — same value `ChangedCallback` gets.
 			function Section:AddKeybind(id, cfg)
 				cfg = cfg or {}
 				local controlWidth = 90
@@ -3068,20 +3146,22 @@ function NovaUI:CreateWindow(config)
 				local Keybind = {
 					Value = cfg.Default,
 					Mode = cfg.Mode or "Toggle",
-					Changed = Signal.new(),
+					Changed = Signal.new(),        -- state (true/false)
+					KeybindChanged = Signal.new(), -- the bound key itself
 					Click = Signal.new(),
 					_state = false,
 					_listening = false,
 				}
 
 				function Keybind:OnChanged(fn) Keybind.Changed:Connect(fn) end
+				function Keybind:OnKeybindChanged(fn) Keybind.KeybindChanged:Connect(fn) end
 				function Keybind:OnClick(fn) Keybind.Click:Connect(fn) end
 				function Keybind:GetState() return Keybind._state end
 				function Keybind:SetValue(key, mode)
 					Keybind.Value = key
 					if mode then Keybind.Mode = mode end
 					keyBtn.Text = tostring(key or "None")
-					Keybind.Changed:Fire(key)
+					Keybind.KeybindChanged:Fire(key)
 					if cfg.ChangedCallback then cfg.ChangedCallback(key) end
 				end
 
@@ -3140,14 +3220,15 @@ function NovaUI:CreateWindow(config)
 							Keybind._state = not Keybind._state
 							if Keybind._state then
 								Keybind.Click:Fire()
-								if cfg.Callback then cfg.Callback(true) end
-							else
-								if cfg.Callback then cfg.Callback(false) end
 							end
+							Keybind.Changed:Fire(Keybind._state)
+							if cfg.Callback then cfg.Callback(Keybind._state) end
 						elseif Keybind.Mode == "Hold" then
 							Keybind._state = true
+							Keybind.Changed:Fire(true)
 							if cfg.Callback then cfg.Callback(true) end
 						elseif Keybind.Mode == "Always" then
+							Keybind.Changed:Fire(true)
 							if cfg.Callback then cfg.Callback(true) end
 						end
 					end
@@ -3161,6 +3242,7 @@ function NovaUI:CreateWindow(config)
 					elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
 					if keyName == Keybind.Value then
 						Keybind._state = false
+						Keybind.Changed:Fire(false)
 						if cfg.Callback then cfg.Callback(false) end
 					end
 				end))
