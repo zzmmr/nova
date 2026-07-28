@@ -2614,7 +2614,9 @@ function NovaUI:CreateWindow(config)
 					Dropdown.Changed:Fire(Dropdown.Value)
 					if cfg.Callback then cfg.Callback(Dropdown.Value) end
 				end
-				for i, name in ipairs(values) do
+				-- Pulled out so SetOptions can rebuild the list on demand
+				-- instead of only ever building it once at creation time.
+				local function CreateOptionButton(name, i)
 					local optBtn = New("TextButton", {
 						Text = tostring(name),
 						Font = Enum.Font.Gotham,
@@ -2657,7 +2659,42 @@ function NovaUI:CreateWindow(config)
 							ClosePopup()
 						end
 					end)
+					return optBtn
 				end
+				for i, name in ipairs(values) do
+					CreateOptionButton(name, i)
+				end
+
+				-- Dropdown:SetOptions(list) — replaces the whole option list
+				-- (rebuilds the popup from scratch). Current Value is kept if
+				-- it's still present in the new list; otherwise it's cleared
+				-- (single-select) or pruned down to only the surviving keys
+				-- (multi-select), same as removing a now-invalid selection.
+				function Dropdown:SetOptions(list)
+					values = list or {}
+					for _, btn in pairs(Dropdown._optionButtons) do btn:Destroy() end
+					Dropdown._optionButtons = {}
+					for key, tw in pairs(hoverTweens) do
+						tw:Cancel()
+						hoverTweens[key] = nil
+					end
+					for i, name in ipairs(values) do
+						CreateOptionButton(name, i)
+					end
+					listFrame.Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(#values, 6) * 28 + 8)
+					if multi then
+						local survivors = {}
+						for name, on in pairs(Dropdown.Value or {}) do
+							if on and table.find(values, name) then survivors[name] = true end
+						end
+						Dropdown.Value = survivors
+					elseif Dropdown.Value ~= nil and not table.find(values, Dropdown.Value) then
+						Dropdown.Value = nil
+					end
+					RefreshButton()
+					RefreshHighlights()
+				end
+
 				ddBtn.MouseButton1Click:Connect(function()
 					OpenPopup(listFrame, ddBtn, {
 						Align = "right",
@@ -3183,7 +3220,10 @@ function NovaUI:CreateWindow(config)
 				return { Instance = btn }
 			end
 
-			--- Section:AddParagraph({ Title, Content })
+			--- Section:AddParagraph({ Title, Content }) -> { Instance, SetTitle(text), SetContent(text) }
+			-- SetTitle only has something to update if the paragraph was
+			-- created with a Title to begin with — a paragraph created
+			-- without one has no title TextLabel to reveal later.
 			function Section:AddParagraph(cfg)
 				cfg = cfg or {}
 				Section._rowCount = Section._rowCount + 1
@@ -3197,8 +3237,9 @@ function NovaUI:CreateWindow(config)
 				Pad(card, 4, 6, 4, 6)
 				FadeSlideIn(card, math.min(Section._rowCount * 0.012, 0.1))
 				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3), Parent = card })
+				local titleLabel
 				if cfg.Title then
-					New("TextLabel", {
+					titleLabel = New("TextLabel", {
 						Text = cfg.Title,
 						Font = Enum.Font.GothamMedium,
 						TextSize = 13,
@@ -3210,7 +3251,7 @@ function NovaUI:CreateWindow(config)
 						Parent = card,
 					})
 				end
-				New("TextLabel", {
+				local contentLabel = New("TextLabel", {
 					Text = cfg.Content or "",
 					Font = Enum.Font.Gotham,
 					TextSize = 12,
@@ -3223,7 +3264,14 @@ function NovaUI:CreateWindow(config)
 					LayoutOrder = 2,
 					Parent = card,
 				})
-				return { Instance = card }
+				local Paragraph = { Instance = card }
+				function Paragraph:SetTitle(text)
+					if titleLabel then titleLabel.Text = text end
+				end
+				function Paragraph:SetContent(text)
+					contentLabel.Text = text
+				end
+				return Paragraph
 			end
 
 			return Section
