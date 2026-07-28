@@ -255,23 +255,23 @@ local function AddShadow(parent, opts)
 	})
 end
 
--- Small, snappy hover feedback (no bounce) — used on icon buttons.
-local function AddHoverScale(button, scaleUp)
-	scaleUp = scaleUp or 1.04
-	local uiScale = New("UIScale", { Scale = 1, Parent = button })
+-- Hover feedback everywhere is transparency-only now — no Size/UIScale
+-- animation on any button, so nothing ever nudges layout or competes with
+-- a control's own Size-driven state (sliders, resize handles, etc.).
+-- `idleTransparency`/`hoverTransparency` let a solid-fill button (idle 0,
+-- hover ~0.35 — fades toward see-through) and an already-transparent
+-- reveal-style icon button (idle 1, hover ~0.85 — fades toward opaque) both
+-- use the same helper.
+local function AddHoverFade(button, idleTransparency, hoverTransparency, duration)
+	idleTransparency = idleTransparency or 0
+	hoverTransparency = hoverTransparency or 0.35
+	duration = duration or 0.1
 	button.MouseEnter:Connect(function()
-		Tween(uiScale, { Scale = scaleUp }, 0.1)
+		Tween(button, { BackgroundTransparency = hoverTransparency }, duration)
 	end)
 	button.MouseLeave:Connect(function()
-		Tween(uiScale, { Scale = 1 }, 0.1)
+		Tween(button, { BackgroundTransparency = idleTransparency }, duration)
 	end)
-	button.MouseButton1Down:Connect(function()
-		Tween(uiScale, { Scale = scaleUp * 0.95 }, 0.06)
-	end)
-	button.MouseButton1Up:Connect(function()
-		Tween(uiScale, { Scale = scaleUp }, 0.06)
-	end)
-	return uiScale
 end
 
 -- Quick fade + tiny scale for popups/dropdown lists when they open. No bounce.
@@ -826,7 +826,6 @@ function NovaUI:CreateWindow(config)
 		})
 		Round(btn, math.floor(sizePx / 2) - 3)
 		local state = { handle = SetButtonIcon(btn, iconName, fallbackText, iconSize or 14, theme.SubText) }
-		AddHoverScale(btn, 1.08)
 		btn.MouseEnter:Connect(function()
 			Tween(btn, { BackgroundTransparency = 0.85 }, 0.1)
 			state.handle.SetColor(theme.Text)
@@ -879,6 +878,7 @@ function NovaUI:CreateWindow(config)
 	-- further below (it needs the Window table's minimized/fullscreen state).
 	local ResizeHandle = New("TextButton", {
 		Text = "",
+		BackgroundColor3 = theme.ElementBackground,
 		BackgroundTransparency = 1,
 		AutoButtonColor = false,
 		AnchorPoint = Vector2.new(1, 1),
@@ -887,16 +887,19 @@ function NovaUI:CreateWindow(config)
 		ZIndex = 50,
 		Parent = Main,
 	})
+	Round(ResizeHandle, 6)
+	local resizeIcon
 	do
 		local icon = GetIcon("arrow-down-right", 14)
 		if icon then
+			resizeIcon = icon
 			icon.AnchorPoint = Vector2.new(0.5, 0.5)
 			icon.Position = UDim2.new(0.5, 0, 0.5, 0)
 			icon.ImageColor3 = theme.SubText
 			icon.ZIndex = 50
 			icon.Parent = ResizeHandle
 		else
-			New("TextLabel", {
+			resizeIcon = New("TextLabel", {
 				Text = "\226\134\152", -- "↘"
 				Font = Enum.Font.GothamBold,
 				TextSize = 13,
@@ -908,7 +911,14 @@ function NovaUI:CreateWindow(config)
 			})
 		end
 	end
-	AddHoverScale(ResizeHandle, 1.2)
+	AddHoverFade(ResizeHandle, 1, 0.85)
+	local resizeIconColorProp = resizeIcon:IsA("ImageLabel") and "ImageColor3" or "TextColor3"
+	ResizeHandle.MouseEnter:Connect(function()
+		Tween(resizeIcon, { [resizeIconColorProp] = theme.Text }, 0.1)
+	end)
+	ResizeHandle.MouseLeave:Connect(function()
+		Tween(resizeIcon, { [resizeIconColorProp] = theme.SubText }, 0.1)
+	end)
 
 	--=========================================================================
 	-- OVERLAY (dropdown lists / colorpickers / config selector render here,
@@ -1276,13 +1286,11 @@ function NovaUI:CreateWindow(config)
 	})
 	Round(CreateConfigBtn, 8)
 	local createConfigIconHandle = SetButtonIcon(CreateConfigBtn, "file-plus-corner", "+", 14, theme.SubText)
-	AddHoverScale(CreateConfigBtn, 1.06)
+	AddHoverFade(CreateConfigBtn, 0, 0.4)
 	CreateConfigBtn.MouseEnter:Connect(function()
-		Tween(CreateConfigBtn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
 		createConfigIconHandle.SetColor(theme.Text)
 	end)
 	CreateConfigBtn.MouseLeave:Connect(function()
-		Tween(CreateConfigBtn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
 		createConfigIconHandle.SetColor(theme.SubText)
 	end)
 	AttachTooltip(CreateConfigBtn, "Create Config")
@@ -1301,13 +1309,11 @@ function NovaUI:CreateWindow(config)
 	})
 	Round(SaveConfigBtn, 8)
 	local saveIconHandle = SetButtonIcon(SaveConfigBtn, "save", "\226\134\147", 14, theme.SubText)
-	AddHoverScale(SaveConfigBtn, 1.06)
+	AddHoverFade(SaveConfigBtn, 0, 0.4)
 	SaveConfigBtn.MouseEnter:Connect(function()
-		Tween(SaveConfigBtn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
 		saveIconHandle.SetColor(theme.Text)
 	end)
 	SaveConfigBtn.MouseLeave:Connect(function()
-		Tween(SaveConfigBtn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
 		saveIconHandle.SetColor(theme.SubText)
 	end)
 	AttachTooltip(SaveConfigBtn, "Save Config")
@@ -1865,33 +1871,34 @@ function NovaUI:CreateWindow(config)
 			ZIndex = 50,
 			Parent = Main,
 		})
-		Tween(overlay, { BackgroundTransparency = 0.4 }, 0.15)
+		Tween(overlay, { BackgroundTransparency = 0.5 }, 0.15)
 
 		local box = New("Frame", {
 			BackgroundColor3 = theme.SecondaryBackground,
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
-			Size = UDim2.new(0, 300, 0, 0),
+			Size = UDim2.new(0, 320, 0, 0),
 			AutomaticSize = Enum.AutomaticSize.Y,
 			ZIndex = 51,
 			Parent = overlay,
 		})
-		Round(box, 8)
+		Round(box, 10)
 		Stroke(box, theme.Border, 1)
-		Pad(box, 16)
+		Pad(box, 20)
+		local boxShadow = AddShadow(box, { Transparency = 0.35, OffsetY = 14, Blur = 28 })
 		local boxScale = New("UIScale", { Scale = 0.96, Parent = box })
 		Tween(boxScale, { Scale = 1 }, 0.15, EASE_SOFT)
 
-		New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10), Parent = box })
+		New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 14), Parent = box })
 
 		New("TextLabel", {
 			Text = cfg.Title or "Dialog",
 			Font = Enum.Font.GothamBold,
-			TextSize = 16,
+			TextSize = 17,
 			TextColor3 = theme.Text,
 			BackgroundTransparency = 1,
 			TextXAlignment = Enum.TextXAlignment.Left,
-			Size = UDim2.new(1, 0, 0, 20),
+			Size = UDim2.new(1, 0, 0, 22),
 			ZIndex = 51,
 			LayoutOrder = 1,
 			Parent = box,
@@ -1902,6 +1909,7 @@ function NovaUI:CreateWindow(config)
 				Text = cfg.Content,
 				Font = Enum.Font.Gotham,
 				TextSize = 13,
+				LineHeight = 1.25,
 				TextColor3 = theme.SubText,
 				TextWrapped = true,
 				BackgroundTransparency = 1,
@@ -1971,6 +1979,10 @@ function NovaUI:CreateWindow(config)
 		})
 
 		for _, btnCfg in ipairs(cfg.Buttons or {}) do
+			-- Flat "ghost" style: a bordered pill that fades toward
+			-- see-through on hover instead of scaling up or swapping fill
+			-- color — the border brightening to the accent color is what
+			-- reads as the hover state once the fill has faded.
 			local btn = New("TextButton", {
 				Text = btnCfg.Title,
 				Font = Enum.Font.GothamBold,
@@ -1978,22 +1990,27 @@ function NovaUI:CreateWindow(config)
 				TextColor3 = theme.Text,
 				BackgroundColor3 = theme.ElementBackground,
 				AutoButtonColor = false,
-				Size = UDim2.new(0, 90, 1, 0),
+				AutomaticSize = Enum.AutomaticSize.X,
+				Size = UDim2.new(0, 0, 1, 0),
 				ZIndex = 51,
 				Parent = btnRow,
 			})
-			Round(btn, 6)
-			AddHoverScale(btn, 1.05)
+			New("UISizeConstraint", { MinSize = Vector2.new(76, 0), Parent = btn })
+			Pad(btn, 16, 0, 16, 0)
+			Round(btn, 7)
+			local btnStroke = Stroke(btn, theme.Border, 1)
+			AddHoverFade(btn, 0, 0.5)
 			btn.MouseEnter:Connect(function()
-				Tween(btn, { BackgroundColor3 = theme.ElementBackgroundHover }, 0.1)
+				Tween(btnStroke, { Color = theme.Accent }, 0.1)
 			end)
 			btn.MouseLeave:Connect(function()
-				Tween(btn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
+				Tween(btnStroke, { Color = theme.Border }, 0.1)
 			end)
 			btn.MouseButton1Click:Connect(function()
 				Tween(overlay, { BackgroundTransparency = 1 }, 0.12)
 				Tween(boxScale, { Scale = 0.96 }, 0.12)
 				Tween(box, { BackgroundTransparency = 1 }, 0.12)
+				Tween(boxShadow, { Transparency = 1 }, 0.12)
 				-- Fade every descendant too (text, button backgrounds/text,
 				-- strokes, the input field's stroke, etc.) — otherwise
 				-- everything but the card background stays fully opaque and
@@ -2048,7 +2065,6 @@ function NovaUI:CreateWindow(config)
 		end
 
 		AttachTooltip(button, tabConfig.Title or ("Tab " .. tabIndex))
-		AddHoverScale(button, 1.08)
 
 		button.MouseEnter:Connect(function()
 			if tabIndex ~= Window._activeTabIndex then
@@ -3016,7 +3032,7 @@ function NovaUI:CreateWindow(config)
 				})
 				Round(keyBtn, 6)
 				local keyBtnStroke = Stroke(keyBtn, theme.Accent, 1.5, 1)
-				AddHoverScale(keyBtn, 1.05)
+				AddHoverFade(keyBtn, 0, 0.35)
 				keyBtn.MouseEnter:Connect(function()
 					Tween(keyBtn, { BackgroundColor3 = theme.ElementBackground }, 0.1)
 				end)
@@ -3233,7 +3249,7 @@ function NovaUI:CreateWindow(config)
 					Parent = controlHolder,
 				})
 				Round(btn, 6)
-				AddHoverScale(btn, 1.04)
+				AddHoverFade(btn, 0, 0.3)
 				btn.MouseButton1Click:Connect(function()
 					if cfg.Callback then cfg.Callback() end
 				end)
