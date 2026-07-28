@@ -835,12 +835,16 @@ function NovaUI:CreateWindow(config)
 		return conn
 	end
 
+	-- config.Parent lets you place the window's ScreenGui somewhere other
+	-- than the default (the LocalPlayer's PlayerGui) — e.g. CoreGui (via a
+	-- privileged script), a specific PlayerGui subfolder, or a testing
+	-- environment that doesn't have a normal PlayerGui at all.
 	local ScreenGui = New("ScreenGui", {
 		Name = "NovaUI",
 		ResetOnSpawn = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		DisplayOrder = 100,
-		Parent = ScreenParent(),
+		Parent = config.Parent or ScreenParent(),
 	})
 
 	-- Tooltip helper (needs ScreenGui + theme, so it's scoped per-window).
@@ -1334,14 +1338,18 @@ function NovaUI:CreateWindow(config)
 		LayoutOrder = 2,
 		Parent = SelectorPill,
 	})
+	-- Kept as a variable so it can be flipped 180° open/closed, same as the
+	-- regular Dropdown's chevron.
+	local selectorChevron
 	do
 		local icon = GetIcon("chevron-down", 12)
 		if icon then
+			selectorChevron = icon
 			icon.LayoutOrder = 3
 			icon.ImageColor3 = theme.SubText
 			icon.Parent = SelectorPill
 		else
-			New("TextLabel", {
+			selectorChevron = New("TextLabel", {
 				Text = "\226\150\190",
 				Font = Enum.Font.Gotham,
 				TextSize = 10,
@@ -1920,7 +1928,18 @@ function NovaUI:CreateWindow(config)
 	end
 
 	SelectorPill.MouseButton1Click:Connect(function()
-		OpenPopup(SelectorList, SelectorPill, { Align = "left", GrowHeight = true })
+		OpenPopup(SelectorList, SelectorPill, {
+			Align = "left",
+			GrowHeight = true,
+			OnClose = function()
+				Tween(selectorChevron, { Rotation = 0 }, 0.12)
+			end,
+		})
+		-- OpenPopup toggles closed (and Visible=false) if this was already
+		-- open; only flip to 180° when it actually just opened.
+		if SelectorList.Visible then
+			Tween(selectorChevron, { Rotation = 180 }, 0.12)
+		end
 	end)
 	SaveConfigBtn.MouseButton1Click:Connect(function()
 		ConfigSelector.Save:Fire(ConfigSelector.Value, NovaUI:ExportConfigJSON())
