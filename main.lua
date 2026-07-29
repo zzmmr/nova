@@ -960,14 +960,16 @@ function NovaUI:CreateWindow(config)
 	-- Bottom-right squared off since that's where the resize grip sits.
 	Round(Main, 14, { BottomRight = 0 })
 	Stroke(Main, theme.Border, 1)
-	-- Blur cut way down on purpose: unlike every other AddShadow() call in
-	-- this file (dialogs, popups, notifications), this one is on Main
-	-- itself — it renders continuously for the entire time the window is
-	-- open, not just while some transient popup is visible. A 28px blur
-	-- recomputed every single rendered frame for as long as the UI is on
-	-- screen is a real, constant GPU cost, and the most likely source of
-	-- "only happens while the window is open" frame drops.
-	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 12 })
+	-- Blur = 0 on purpose: unlike every other AddShadow() call in this file
+	-- (dialogs, popups, notifications), this one is on Main itself — it
+	-- renders continuously for the entire time the window is open, not just
+	-- while some transient popup is visible, so BlurRadius (the actual
+	-- expensive part of a UIShadow — a real per-frame GPU blur) is the one
+	-- confirmed to cause the "only happens while the window is open" lag.
+	-- Blur = 0 keeps the shadow itself visible (a flat, hard-edged offset
+	-- shadow, still gives Main some depth) without that per-frame blur cost
+	-- — no need for ReducedEffects just to make this one shadow cheap.
+	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 0 })
 	local mainScale = New("UIScale", { Scale = 0.97, Parent = Main })
 
 	-- Opening animation: a restrained fade + tiny scale-up (no bounce).
@@ -2575,6 +2577,13 @@ function NovaUI:CreateWindow(config)
 					end
 				end
 				Render(false)
+				-- Fire once at creation too, with the actual starting value
+				-- (Default or false — never hardcoded true), same as Dropdown
+				-- already does for its cfg.Default. Without this, Callback/
+				-- OnChanged never hear about the toggle's initial state at
+				-- all — only about changes from the first click onward.
+				Toggle.Changed:Fire(Toggle.Value)
+				if cfg.Callback then cfg.Callback(Toggle.Value) end
 				function Toggle:SetValue(value)
 					Toggle.Value = value
 					Render(true)
@@ -2635,8 +2644,16 @@ function NovaUI:CreateWindow(config)
 				local Slider = { Value = cfg.Default or min, Changed = Signal.new() }
 				local function ApplyRounding(v)
 					if rounding <= 0 then return math.floor(v + 0.5) end
-					local mult = 10 ^ rounding
-					return math.floor(v * mult + 0.5) / mult
+					-- Going through string.format (rather than
+					-- math.floor(v * mult + 0.5) / mult) matters here: that
+					-- division doesn't always land on a clean decimal in
+					-- floating point (e.g. it can store as 83.49999999999997
+					-- instead of 83.5), so Slider.Value/Callback would carry
+					-- that noise even though the label displayed "83.5" via
+					-- its own separate string.format call. Rounding the
+					-- actual stored value the same way the label formats it
+					-- keeps both in sync.
+					return tonumber(string.format("%." .. rounding .. "f", v))
 				end
 				local function RenderSlider(v)
 					v = math.clamp(v, min, max)
