@@ -399,6 +399,10 @@ end
 local function SerializeValue(value)
 	if typeof(value) == "Color3" then
 		return { __type = "Color3", R = value.R, G = value.G, B = value.B }
+	elseif typeof(value) == "EnumItem" then
+		-- Keybind values are real Enum.KeyCode / Enum.UserInputType items now,
+		-- neither of which HttpService:JSONEncode can serialize directly.
+		return { __type = "EnumItem", EnumType = tostring(value.EnumType):gsub("^Enum%.", ""), Name = value.Name }
 	end
 	return value
 end
@@ -406,8 +410,43 @@ end
 local function DeserializeValue(value)
 	if typeof(value) == "table" and value.__type == "Color3" then
 		return Color3.new(value.R or 0, value.G or 0, value.B or 0)
+	elseif typeof(value) == "table" and value.__type == "EnumItem" then
+		local enumType = Enum[value.EnumType]
+		return enumType and enumType[value.Name]
 	end
 	return value
+end
+
+--=============================================================================
+-- KEYBIND-STYLE INPUT MATCHING — shared between Section:AddKeybind and any
+-- rebindable hotkey field (Window.MinimizeKey, Window.ToggleKey, ...). A
+-- "bound value" is always a real Enum item: Enum.KeyCode.* for a keyboard
+-- key, or Enum.UserInputType.MouseButton1/2/3 for a mouse button.
+--=============================================================================
+
+local MOUSE_BUTTON_LABELS = {
+	[Enum.UserInputType.MouseButton1] = "MB1",
+	[Enum.UserInputType.MouseButton2] = "MB2",
+	[Enum.UserInputType.MouseButton3] = "MB3",
+}
+
+local function KeybindDisplayName(value)
+	if value == nil then return "None" end
+	if typeof(value) == "EnumItem" then
+		if value.EnumType == Enum.KeyCode then return value.Name end
+		if value.EnumType == Enum.UserInputType then return MOUSE_BUTTON_LABELS[value] or value.Name end
+	end
+	return tostring(value)
+end
+
+local function KeybindMatches(value, input)
+	if typeof(value) ~= "EnumItem" then return false end
+	if value.EnumType == Enum.KeyCode then
+		return input.KeyCode == value
+	elseif value.EnumType == Enum.UserInputType then
+		return input.UserInputType == value
+	end
+	return false
 end
 
 --- NovaUI:ExportConfig() -> table mapping every registered option id to its
@@ -1775,33 +1814,38 @@ function NovaUI:CreateWindow(config)
 		end))
 	end
 
-	if config.MinimizeKey then
-		Track(UserInputService.InputBegan:Connect(function(input, processed)
-			if processed then return end
-			if input.KeyCode == config.MinimizeKey then
-				Window:ToggleMinimize()
-			end
-		end))
-	end
+	-- Window.MinimizeKey / Window.ToggleKey are live, mutable fields (unlike
+	-- the `config` table they're seeded from) — assign a new Enum.KeyCode.*
+	-- (keyboard) or Enum.UserInputType.MouseButton1/2/3 (mouse) item to
+	-- either one at any time, e.g. from a Keybind's ChangedCallback, and the
+	-- InputBegan handlers below (which read the field fresh on every input,
+	-- not a captured snapshot) pick it up immediately. Set to nil to unbind.
+	Window.MinimizeKey = config.MinimizeKey
+	Window.ToggleKey = config.ToggleKey
+
+	Track(UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if KeybindMatches(Window.MinimizeKey, input) then
+			Window:ToggleMinimize()
+		end
+	end))
 
 	--- Window:SetVisible(visible) / Window:ToggleVisible() — fully shows or
 	--- hides the whole GUI (ScreenGui.Enabled), distinct from ToggleMinimize
 	--- (which just collapses to the top bar, keeping it visible/usable).
-	--- Bound to `config.ToggleKey` below if given.
+	--- Bound to `Window.ToggleKey` below if given.
 	function Window:SetVisible(visible)
 		ScreenGui.Enabled = visible
 	end
 	function Window:ToggleVisible()
 		Window:SetVisible(not ScreenGui.Enabled)
 	end
-	if config.ToggleKey then
-		Track(UserInputService.InputBegan:Connect(function(input, processed)
-			if processed then return end
-			if input.KeyCode == config.ToggleKey then
-				Window:ToggleVisible()
-			end
-		end))
-	end
+	Track(UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if KeybindMatches(Window.ToggleKey, input) then
+			Window:ToggleVisible()
+		end
+	end))
 
 	function Window:Destroy()
 		ClosePopup()
@@ -3229,14 +3273,23 @@ function NovaUI:CreateWindow(config)
 				return Colorpicker
 			end
 
+			-- KeybindDisplayName/KeybindMatches are defined module-level (shared
+			-- with Window.MinimizeKey/ToggleKey below) — see near DeserializeValue.
+
 			--- Section:AddKeybind(id, { Title, Description, Mode, Default, Elevated, Callback, ChangedCallback })
 			--- Two separate signals, easy to mix up since they're both
 			--- "changed": Keybind:OnChanged(fn) fires with the live true/false
 			--- pressed state (Toggle flip, Hold press/release, Always press) —
 			--- same value `Callback` gets. Keybind:OnKeybindChanged(fn) fires
-			--- with the new key name (e.g. "F") only when the BOUND KEY itself
-			--- is changed — clicking the button and pressing a new key, or
-			--- calling :SetValue(key) in code — same value `ChangedCallback` gets.
+			--- with the new bound value only when the BOUND KEY itself is
+			--- changed — clicking the button and pressing a new key/mouse
+			--- button, or calling :SetValue(value) in code — same value
+			--- `ChangedCallback` gets.
+			--- `Default`/`Value`/the value passed to :SetValue() and to
+			--- ChangedCallback are real Enum items, not strings: an
+			--- Enum.KeyCode item for keyboard keys (e.g. Enum.KeyCode.F), or
+			--- an Enum.UserInputType item for mouse buttons (e.g.
+			--- Enum.UserInputType.MouseButton1/2/3).
 			function Section:AddKeybind(id, cfg)
 				cfg = cfg or {}
 				local controlWidth = 90
@@ -3244,7 +3297,7 @@ function NovaUI:CreateWindow(config)
 				local _, controlHolder = CreateRow(cfg, controlWidth)
 
 				local keyBtn = New("TextButton", {
-					Text = tostring(cfg.Default or "None"),
+					Text = KeybindDisplayName(cfg.Default),
 					Font = Enum.Font.Gotham,
 					TextSize = 12,
 					TextColor3 = theme.Text,
@@ -3280,7 +3333,7 @@ function NovaUI:CreateWindow(config)
 				function Keybind:SetValue(key, mode)
 					Keybind.Value = key
 					if mode then Keybind.Mode = mode end
-					keyBtn.Text = tostring(key or "None")
+					keyBtn.Text = KeybindDisplayName(key)
 					Keybind.KeybindChanged:Fire(key)
 					if cfg.ChangedCallback then cfg.ChangedCallback(key) end
 				end
@@ -3318,22 +3371,24 @@ function NovaUI:CreateWindow(config)
 
 				Track(UserInputService.InputBegan:Connect(function(input, processed)
 					if Keybind._listening then
-						local keyName
-						if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
-						elseif input.UserInputType == Enum.UserInputType.MouseButton2 then keyName = "MB2"
-						elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
-						if keyName then
+						local newValue
+						if input.UserInputType == Enum.UserInputType.MouseButton1
+							or input.UserInputType == Enum.UserInputType.MouseButton2
+							or input.UserInputType == Enum.UserInputType.MouseButton3 then
+							newValue = input.UserInputType
+						elseif input.KeyCode ~= Enum.KeyCode.Unknown then
+							newValue = input.KeyCode
+						end
+						if newValue then
 							Keybind._listening = false
 							StopListenPulse()
-							Keybind:SetValue(keyName)
+							Keybind:SetValue(newValue)
 						end
 						return
 					end
 
 					if processed then return end
-					local matches = (input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode.Name == Keybind.Value)
-						or (input.UserInputType == Enum.UserInputType.MouseButton1 and Keybind.Value == "MB1")
-						or (input.UserInputType == Enum.UserInputType.MouseButton2 and Keybind.Value == "MB2")
+					local matches = KeybindMatches(Keybind.Value, input)
 
 					if matches then
 						if Keybind.Mode == "Toggle" then
@@ -3356,11 +3411,7 @@ function NovaUI:CreateWindow(config)
 
 				Track(UserInputService.InputEnded:Connect(function(input)
 					if Keybind.Mode ~= "Hold" then return end
-					local keyName
-					if input.UserInputType == Enum.UserInputType.MouseButton1 then keyName = "MB1"
-					elseif input.UserInputType == Enum.UserInputType.MouseButton2 then keyName = "MB2"
-					elseif input.KeyCode ~= Enum.KeyCode.Unknown then keyName = input.KeyCode.Name end
-					if keyName == Keybind.Value then
+					if KeybindMatches(Keybind.Value, input) then
 						Keybind._state = false
 						Keybind.Changed:Fire(false)
 						if cfg.Callback then cfg.Callback(false) end
