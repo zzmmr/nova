@@ -1919,13 +1919,15 @@ function NovaUI:CreateWindow(config)
 	--- save-config button is clicked — jsonString is every registered
 	--- option's current value, JSON-encoded (Colorpicker values included).
 	--- Hook up your own persistence (e.g. writeFile) inside that callback.
-	--- Window.ConfigSelector:OnCreate(fn) fires with just the name whenever a
-	--- new config is made via the "Create Config" ribbon button's dialog —
-	--- a good place to save a fresh (empty/default) file for it right away.
+	--- Window.ConfigSelector:OnCreate(fn) fires with (name, jsonString) whenever
+	--- a new config is made via the "Create Config" ribbon button's dialog —
+	--- jsonString is the same current-state export OnSave gets, so you can
+	--- save a fresh file for it right away without calling ExportConfigJSON
+	--- yourself.
 	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), Save = Signal.new(), Created = Signal.new(), _options = {}, _buttons = {} }
 	function ConfigSelector:OnChanged(fn) ConfigSelector.Changed:Connect(fn) end
 	function ConfigSelector:OnSave(fn) ConfigSelector.Save:Connect(fn) end
-	--- ConfigSelector:OnCreate(fn) — fires with the new name whenever a
+	--- ConfigSelector:OnCreate(fn) — fires with (name, jsonString) whenever a
 	--- config is made via the "Create Config" ribbon button's dialog.
 	function ConfigSelector:OnCreate(fn) ConfigSelector.Created:Connect(fn) end
 	function ConfigSelector:SetValue(name)
@@ -2032,7 +2034,7 @@ function NovaUI:CreateWindow(config)
 						if not name or name == "" then return end
 						ConfigSelector:AddOption(name)
 						ConfigSelector:SetValue(name)
-						ConfigSelector.Created:Fire(name)
+						ConfigSelector.Created:Fire(name, NovaUI:ExportConfigJSON())
 					end,
 				},
 			},
