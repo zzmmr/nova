@@ -960,7 +960,14 @@ function NovaUI:CreateWindow(config)
 	-- Bottom-right squared off since that's where the resize grip sits.
 	Round(Main, 14, { BottomRight = 0 })
 	Stroke(Main, theme.Border, 1)
-	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 14, Blur = 28 })
+	-- Blur cut way down on purpose: unlike every other AddShadow() call in
+	-- this file (dialogs, popups, notifications), this one is on Main
+	-- itself — it renders continuously for the entire time the window is
+	-- open, not just while some transient popup is visible. A 28px blur
+	-- recomputed every single rendered frame for as long as the UI is on
+	-- screen is a real, constant GPU cost, and the most likely source of
+	-- "only happens while the window is open" frame drops.
+	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 12 })
 	local mainScale = New("UIScale", { Scale = 0.97, Parent = Main })
 
 	-- Opening animation: a restrained fade + tiny scale-up (no bounce).
@@ -2585,7 +2592,10 @@ function NovaUI:CreateWindow(config)
 			function Section:AddSlider(id, cfg)
 				cfg = cfg or {}
 				local min, max = cfg.Min or 0, cfg.Max or 100
-				local rounding = cfg.Rounding or 0
+				-- Defaults to 1 decimal place now (was whole numbers); still
+				-- overridable per-slider — pass Rounding = 0 for whole numbers
+				-- back, but anything above 1 gets capped at 1 either way.
+				local rounding = math.min(cfg.Rounding or 1, 1)
 				local suffix = cfg.Suffix or ""
 				local controlWidth = 160
 
@@ -2633,7 +2643,11 @@ function NovaUI:CreateWindow(config)
 					local alpha = (max ~= min) and (v - min) / (max - min) or 0
 					fill.Size = UDim2.new(alpha, 0, 1, 0)
 					knob.Position = UDim2.new(alpha, 0, 0.5, 0)
-					valueLabel.Text = tostring(v) .. suffix
+					-- string.format instead of tostring so the decimal count is
+					-- always consistent (e.g. always "80.0", never "80" one time
+					-- and "80.5" the next just because a value landed on a
+					-- whole number).
+					valueLabel.Text = string.format("%." .. rounding .. "f", v) .. suffix
 				end
 				RenderSlider(Slider.Value)
 				function Slider:SetValue(v)
