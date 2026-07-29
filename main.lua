@@ -1363,20 +1363,32 @@ function NovaUI:CreateWindow(config)
 	end
 
 	-- Fixed-width, opaque popup list (rendered in Overlay, never occluded).
+	-- Height is capped and scrollable (same pattern as the regular
+	-- Dropdown's listFrame/listScroll) instead of AutomaticSize.Y with no
+	-- ceiling — unbounded growth meant a long enough config list would just
+	-- keep pushing the popup taller forever, off the bottom of the screen.
 	local SelectorList = New("Frame", {
 		BackgroundColor3 = theme.PopupBackground,
 		BackgroundTransparency = 0,
 		Visible = false,
 		ClipsDescendants = true,
-		Size = UDim2.new(0, 156, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
+		Size = UDim2.new(0, 156, 0, 8),
 		Parent = Overlay,
 	})
 	Round(SelectorList, 8)
 	Stroke(SelectorList, theme.Border, 1)
 	AddShadow(SelectorList, { Transparency = 0.45, OffsetY = 6, Blur = 16 })
-	Pad(SelectorList, 4)
-	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorList })
+	local SelectorListScroll = New("ScrollingFrame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 2,
+		BorderSizePixel = 0,
+		Parent = SelectorList,
+	})
+	Pad(SelectorListScroll, 4)
+	New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = SelectorListScroll })
 
 	-- Create-config button, right next to the selector pill. Opens a
 	-- Dialog with a name input; wired up (with Window:Dialog + ConfigSelector)
@@ -1869,6 +1881,12 @@ function NovaUI:CreateWindow(config)
 		ConfigSelector.Changed:Fire(name)
 	end
 
+	-- Caps how tall SelectorList grows before it scrolls instead — same
+	-- 6-row cap as the regular Dropdown.
+	local function RefreshSelectorListSize()
+		SelectorList.Size = UDim2.new(0, 156, 0, math.min(#ConfigSelector._options, 6) * 28 + 8)
+	end
+
 	local function CreateOptionButton(name, layoutOrder)
 		local btn = New("TextButton", {
 			Text = name,
@@ -1882,7 +1900,7 @@ function NovaUI:CreateWindow(config)
 			AutoButtonColor = false,
 			Size = UDim2.new(1, 0, 0, 26),
 			LayoutOrder = layoutOrder,
-			Parent = SelectorList,
+			Parent = SelectorListScroll,
 		})
 		Round(btn, 4)
 		Pad(btn, 8, 0, 8, 0)
@@ -1903,6 +1921,7 @@ function NovaUI:CreateWindow(config)
 			table.insert(ConfigSelector._options, name)
 			ConfigSelector._buttons[name] = CreateOptionButton(name, i)
 		end
+		RefreshSelectorListSize()
 	end
 
 	--- ConfigSelector:AddOption(name) — appends one entry to the dropdown
@@ -1911,6 +1930,7 @@ function NovaUI:CreateWindow(config)
 		if ConfigSelector._buttons[name] then return end
 		table.insert(ConfigSelector._options, name)
 		ConfigSelector._buttons[name] = CreateOptionButton(name, #ConfigSelector._options)
+		RefreshSelectorListSize()
 	end
 
 	--- ConfigSelector:RemoveOption(name) — removes one entry from the dropdown.
@@ -1925,6 +1945,7 @@ function NovaUI:CreateWindow(config)
 				break
 			end
 		end
+		RefreshSelectorListSize()
 	end
 
 	SelectorPill.MouseButton1Click:Connect(function()
@@ -2017,6 +2038,13 @@ function NovaUI:CreateWindow(config)
 			ZIndex = 50,
 			Parent = Main,
 		})
+		-- Main's own ClipsDescendants only clips children to its rectangular
+		-- bounds, not its rounded shape — UICorner isn't respected by
+		-- ClipsDescendants at all. Without its own matching UICorner here,
+		-- this full-size dim overlay's square corners show right through
+		-- past Main's rounded ones. Same radius/per-corner setup as Main
+		-- itself so it lines up exactly.
+		Round(overlay, 14, { BottomRight = 0 })
 		Tween(overlay, { BackgroundTransparency = 0.5 }, 0.15)
 
 		local box = New("Frame", {
@@ -2031,7 +2059,12 @@ function NovaUI:CreateWindow(config)
 		Round(box, 10)
 		Stroke(box, theme.Border, 1)
 		Pad(box, 20)
-		local boxShadow = AddShadow(box, { Transparency = 0.35, OffsetY = 14, Blur = 28 })
+		-- Blur kept modest on purpose: box's own corner radius is small
+		-- (Round()'s CORNER_SCALE shrinks it to a handful of pixels), and a
+		-- blur radius much bigger than that washes the shadow's shape out
+		-- into what reads as a plain soft rectangle with sharp corners,
+		-- since the blur spread overwhelms the tiny corner curve entirely.
+		local boxShadow = AddShadow(box, { Transparency = 0.3, OffsetY = 10, Blur = 16 })
 		local boxScale = New("UIScale", { Scale = 0.96, Parent = box })
 		Tween(boxScale, { Scale = 1 }, 0.15, EASE_SOFT)
 
