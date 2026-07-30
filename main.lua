@@ -848,6 +848,11 @@ function NovaUI:CreateWindow(config)
 		NovaUI:SetReducedEffects(config.ReducedEffects)
 	end
 
+	-- A light blueish-white tint (nudged from theme.Text toward theme.Accent)
+	-- for the active tab's icon image specifically — plain theme.Text read as
+	-- flat white next to the new blue icon glow, this ties the two together.
+	local activeIconColor = theme.Text:Lerp(theme.Accent, 0.2)
+
 	local size = config.Size or UDim2.fromOffset(600, 480)
 	local railWidth = config.TabWidth or 64
 	local topBarHeight = 64
@@ -2257,7 +2262,7 @@ function NovaUI:CreateWindow(config)
 			end
 			Tween(t._button, { BackgroundTransparency = active and 0.8 or 1 }, 0.1)
 			if t._icon then
-				Tween(t._icon, { ImageColor3 = active and theme.Text or theme.SubText }, 0.1)
+				Tween(t._icon, { ImageColor3 = active and activeIconColor or theme.SubText }, 0.1)
 			end
 			if t._fallbackLabel then
 				t._fallbackLabel.TextColor3 = active and theme.Text or theme.SubText
@@ -2542,7 +2547,7 @@ function NovaUI:CreateWindow(config)
 
 		if tabIndex == 1 then
 			button.BackgroundTransparency = 0.8
-			if iconImage then iconImage.ImageColor3 = theme.Text end
+			if iconImage then iconImage.ImageColor3 = activeIconColor end
 			if fallbackLabel then fallbackLabel.TextColor3 = theme.Text end
 			iconGlow.Transparency = 0.35
 		end
