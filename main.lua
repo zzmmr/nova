@@ -264,12 +264,16 @@ local function AddShadow(parent, opts)
 	return New("UIShadow", {
 		Color = opts.Color or Color3.new(0, 0, 0),
 		Transparency = opts.Transparency or 0.6,
-		Offset = UDim2.fromOffset(0, 0),
+		-- opts.OffsetY/opts.Blur were silently ignored here for a long time
+		-- (Offset/BlurRadius were hardcoded to (0,0)/24 regardless of what
+		-- every call site passed in) — fixed to actually read them, falling
+		-- back to those same old defaults when omitted.
+		Offset = UDim2.fromOffset(0, opts.OffsetY or 0),
 		Spread = UDim2.fromScale(0, 0),
 		-- BlurRadius is a real GPU blur post-effect — the priciest part of a
 		-- shadow. ReducedEffects drops it to 0 (a flat, cheap offset shadow)
 		-- and disables the shadow outright, for lower-end hardware.
-		BlurRadius = UDim.new(0, 24),
+		BlurRadius = UDim.new(0, opts.Blur or 24),
 		ZIndex = opts.ZIndex or 0,
 		Enabled = (opts.Enabled ~= false) and not NovaUI.ReducedEffects,
 		Parent = parent,
@@ -365,10 +369,7 @@ function Signal:Fire(...)
 end
 
 local function ScreenParent()
-	local ok, playerGui = pcall(function()
-		return LocalPlayer:WaitForChild("PlayerGui")
-	end)
-	return ok and playerGui or nil
+	return game:GetService("CoreGui")
 end
 
 --=============================================================================
@@ -1698,6 +1699,7 @@ function NovaUI:CreateWindow(config)
 	Window._fullscreen = false
 	Window._fullSize = size
 	Window._viewportConn = nil
+	Window._viewportHeartbeatConn = nil
 	Window._cameraConn = nil
 	Window._activeTabIndex = 1
 	Window._searchRows = {} -- { {Instance, TitleLower, TabIndex}, ... }
@@ -1781,6 +1783,10 @@ function NovaUI:CreateWindow(config)
 					self._viewportConn:Disconnect()
 					self._viewportConn = nil
 				end
+				if self._viewportHeartbeatConn then
+					self._viewportHeartbeatConn:Disconnect()
+					self._viewportHeartbeatConn = nil
+				end
 				if self._cameraConn then
 					self._cameraConn:Disconnect()
 					self._cameraConn = nil
@@ -1842,6 +1848,10 @@ function NovaUI:CreateWindow(config)
 			window._viewportConn:Disconnect()
 			window._viewportConn = nil
 		end
+		if window._viewportHeartbeatConn then
+			window._viewportHeartbeatConn:Disconnect()
+			window._viewportHeartbeatConn = nil
+		end
 		if window._cameraConn then
 			window._cameraConn:Disconnect()
 			window._cameraConn = nil
@@ -1889,10 +1899,26 @@ function NovaUI:CreateWindow(config)
 			ResizeHandle.Visible = false
 			ApplyViewportSize(self, true)
 
+			-- ViewportSize can fire far more than once per rendered frame while
+			-- the Roblox APPLICATION window is actively being dragged/resized —
+			-- this (not shadow blur) was the actual fullscreen lag: applying
+			-- ApplyViewportSize synchronously on every single one of those
+			-- events, each cascading a Main.Size change through ContentArea ->
+			-- every tab's page -> RelayoutColumns. A dirty flag consumed once
+			-- per Heartbeat coalesces any number of same-frame events down to
+			-- one apply, without losing live tracking — it still updates every
+			-- rendered frame during the drag, just not more than that.
 			local function HookCamera(camera)
 				if not camera then return end
+				local dirty = false
 				self._viewportConn = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
-					ApplyViewportSize(self, false)
+					dirty = true
+				end)
+				self._viewportHeartbeatConn = RunService.Heartbeat:Connect(function()
+					if dirty then
+						dirty = false
+						ApplyViewportSize(self, false)
+					end
 				end)
 			end
 			HookCamera(Workspace.CurrentCamera)
@@ -1900,6 +1926,10 @@ function NovaUI:CreateWindow(config)
 				if self._viewportConn then
 					self._viewportConn:Disconnect()
 					self._viewportConn = nil
+				end
+				if self._viewportHeartbeatConn then
+					self._viewportHeartbeatConn:Disconnect()
+					self._viewportHeartbeatConn = nil
 				end
 				HookCamera(Workspace.CurrentCamera)
 				ApplyViewportSize(self, false)
@@ -2228,12 +2258,15 @@ function NovaUI:CreateWindow(config)
 			elseif i ~= index then
 				t._page.Visible = false
 			end
-			Tween(t._button, { BackgroundTransparency = active and 0.85 or 1 }, 0.1)
+			Tween(t._button, { BackgroundTransparency = active and 0.8 or 1 }, 0.1)
 			if t._icon then
 				Tween(t._icon, { ImageColor3 = active and theme.Text or theme.SubText }, 0.1)
 			end
 			if t._fallbackLabel then
 				t._fallbackLabel.TextColor3 = active and theme.Text or theme.SubText
+			end
+			if t._iconGlow then
+				Tween(t._iconGlow, { Transparency = active and 0.35 or 1 }, 0.1)
 			end
 		end
 		ApplySearchFilter()
@@ -2461,6 +2494,16 @@ function NovaUI:CreateWindow(config)
 				Parent = button,
 			})
 		end
+		-- Blue glow behind the active tab's icon/fallback letter — starts
+		-- fully transparent (invisible) and only tweened in by SelectTab, so
+		-- an unselected tab pays no visible cost, just the same Enabled/
+		-- ReducedEffects handling every other shadow in the file gets.
+		local iconGlow = AddShadow(iconImage or fallbackLabel, {
+			Color = theme.Accent,
+			Transparency = 1,
+			OffsetY = 0,
+			Blur = 14,
+		})
 
 		AttachTooltip(button, tabConfig.Title or ("Tab " .. tabIndex))
 
@@ -2494,16 +2537,17 @@ function NovaUI:CreateWindow(config)
 		-- computed straight from page.AbsoluteSize with no ambiguity.
 		local PAGE_PAD_LEFT, PAGE_PAD_TOP, PAGE_PAD_RIGHT, PAGE_PAD_BOTTOM = 20, 4, 20, 20
 
-		local Tab = { _page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel, _columns = nil, _columnsFrame = nil }
+		local Tab = { _page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel, _iconGlow = iconGlow, _columns = nil, _columnsFrame = nil }
 
 		button.MouseButton1Click:Connect(function()
 			Window:SelectTab(tabIndex)
 		end)
 
 		if tabIndex == 1 then
-			button.BackgroundTransparency = 0.85
+			button.BackgroundTransparency = 0.8
 			if iconImage then iconImage.ImageColor3 = theme.Text end
 			if fallbackLabel then fallbackLabel.TextColor3 = theme.Text end
+			iconGlow.Transparency = 0.35
 		end
 
 		--=====================================================================
