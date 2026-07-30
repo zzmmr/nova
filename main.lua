@@ -716,14 +716,14 @@ function NovaUI:Notify(config)
 		Parent = content,
 	})
 
-	local accentBar = New("Frame", {
+	--[[local accentBar = New("Frame", {
 		BackgroundColor3 = theme.Accent,
 		Size = UDim2.new(0, 3, 0, 0),
 		Parent = card,
 	})
 	content:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		accentBar.Size = UDim2.new(0, 3, 0, content.AbsoluteSize.Y)
-	end)
+	end)]]
 
 	local closeBtn = New("TextButton", {
 		Text = "",
