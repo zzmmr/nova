@@ -60,6 +60,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -1532,6 +1533,147 @@ function NovaUI:CreateWindow(config)
 	CloseBtn.Instance.LayoutOrder = 3
 	AttachTooltip(CloseBtn.Instance, "Close")
 
+	--=========================================================================
+	-- MINIMIZED-MODE INFO ROW — swapped in for the search/config cluster
+	-- (SearchPill/SelectorPill/CreateConfigBtn/SaveConfigBtn) while minimized;
+	-- ChromeRow stays put either way. Shows the logo, the window title, and
+	-- live FPS/ping stats. Same LayoutOrder (1) as SearchPill so it takes
+	-- over that slot in TopBarRow's layout.
+	--=========================================================================
+
+	local MinimizedInfoRow = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		LayoutOrder = 1,
+		Visible = false,
+		Parent = TopBarRow,
+	})
+	New("UIListLayout", {
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 8),
+		Parent = MinimizedInfoRow,
+	})
+
+	do
+		local logo = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.new(0, 22, 0, 22),
+			LayoutOrder = 1,
+			Parent = MinimizedInfoRow,
+		})
+		local icon = config.Logo and GetIcon(config.Logo, 22)
+		if icon then
+			icon.Size = UDim2.new(1, 0, 1, 0)
+			icon.Parent = logo
+		else
+			New("TextLabel", {
+				Text = (config.Title or "N"):sub(1, 1):upper(),
+				Font = Enum.Font.GothamBold,
+				TextSize = 13,
+				TextColor3 = theme.Text,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 1, 0),
+				Parent = logo,
+			})
+		end
+	end
+
+	New("TextLabel", {
+		Text = config.Title or "Window",
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 1, 0),
+		LayoutOrder = 2,
+		Parent = MinimizedInfoRow,
+	})
+
+	-- One "icon + value" stat pill (FPS/ping). Returns the value label so
+	-- the tracker below can update its Text.
+	local function CreateStat(layoutOrder, iconName, fallbackGlyph)
+		local holder = New("Frame", {
+			BackgroundTransparency = 1,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.new(0, 0, 1, 0),
+			LayoutOrder = layoutOrder,
+			Parent = MinimizedInfoRow,
+		})
+		New("UIListLayout", {
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 4),
+			Parent = holder,
+		})
+		local icon = GetIcon(iconName, 13)
+		if icon then
+			icon.LayoutOrder = 1
+			icon.ImageColor3 = theme.SubText
+			icon.Parent = holder
+		else
+			New("TextLabel", {
+				Text = fallbackGlyph,
+				Font = Enum.Font.GothamBold,
+				TextSize = 12,
+				TextColor3 = theme.SubText,
+				BackgroundTransparency = 1,
+				AutomaticSize = Enum.AutomaticSize.X,
+				Size = UDim2.new(0, 0, 1, 0),
+				LayoutOrder = 1,
+				Parent = holder,
+			})
+		end
+		local label = New("TextLabel", {
+			Text = "--",
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			TextColor3 = theme.SubText,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			BackgroundTransparency = 1,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.new(0, 0, 1, 0),
+			LayoutOrder = 2,
+			Parent = holder,
+		})
+		return label
+	end
+
+	local FpsLabel = CreateStat(3, "lightning", "!")
+	local PingLabel = CreateStat(4, "wifi", "~")
+
+	-- FPS/ping only get measured while the info row is actually visible
+	-- (minimized) — connected on minimize, disconnected on restore, so
+	-- there's no always-on Heartbeat cost the rest of the time.
+	local statsConn
+	local statsFrameCount, statsAccum = 0, 0
+	local function StartStatsTracking()
+		if statsConn then return end
+		statsFrameCount, statsAccum = 0, 0
+		statsConn = Track(RunService.Heartbeat:Connect(function(dt)
+			statsFrameCount = statsFrameCount + 1
+			statsAccum = statsAccum + dt
+			if statsAccum >= 0.5 then
+				FpsLabel.Text = tostring(math.floor(statsFrameCount / statsAccum + 0.5))
+				statsFrameCount, statsAccum = 0, 0
+				local player = Players.LocalPlayer
+				local ok, ping = pcall(function() return player and player:GetNetworkPing() end)
+				PingLabel.Text = (ok and ping) and (tostring(math.floor(ping * 1000 + 0.5)) .. "ms") or "--ms"
+			end
+		end))
+	end
+	local function StopStatsTracking()
+		if statsConn then
+			statsConn:Disconnect()
+			statsConn = nil
+		end
+	end
+
 	MakeDraggable(Main, LogoBox, Track)
 	MakeDraggable(Main, TopBarSpacer, Track)
 
@@ -1652,12 +1794,24 @@ function NovaUI:CreateWindow(config)
 			PagesContainer.Visible = false
 			ResizeHandle.Visible = false
 			Tween(ContentArea, { Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 1, 0) }, 0.18, EASE_SOFT)
+			SearchPill.Visible = false
+			SelectorPill.Visible = false
+			CreateConfigBtn.Visible = false
+			SaveConfigBtn.Visible = false
+			MinimizedInfoRow.Visible = true
+			StartStatsTracking()
 		else
 			Sidebar.Visible = true
 			PagesContainer.Visible = true
 			ResizeHandle.Visible = true
 			Tween(ContentArea, { Position = UDim2.new(0, railWidth, 0, 0), Size = UDim2.new(1, -railWidth, 1, 0) }, 0.18, EASE_SOFT)
 			ResizeKeepingTopLeft(self._preMinimizeSize or self._fullSize, 0.18, EASE_SOFT)
+			SearchPill.Visible = true
+			SelectorPill.Visible = true
+			CreateConfigBtn.Visible = true
+			SaveConfigBtn.Visible = true
+			MinimizedInfoRow.Visible = false
+			StopStatsTracking()
 		end
 	end
 
@@ -1712,6 +1866,12 @@ function NovaUI:CreateWindow(config)
 				PagesContainer.Visible = true
 				ContentArea.Position = UDim2.new(0, railWidth, 0, 0)
 				ContentArea.Size = UDim2.new(1, -railWidth, 1, 0)
+				SearchPill.Visible = true
+				SelectorPill.Visible = true
+				CreateConfigBtn.Visible = true
+				SaveConfigBtn.Visible = true
+				MinimizedInfoRow.Visible = false
+				StopStatsTracking()
 				-- Main.Position right now is wherever the MINIMIZED bar was
 				-- left (safe for a short bar, e.g. dragged near the top of
 				-- the screen) — pairing that raw position with the tall
