@@ -379,7 +379,7 @@ NovaUI.Version = "2.0.0"
 NovaUI.Options = {}
 NovaUI.Unloaded = false
 NovaUI.Theme = Themes.Dark
-NovaUI.Icons = nil
+NovaUI.Icons = loadstring(game:HttpGet("https://raw.githubusercontent.com/zzmmr/icons/refs/heads/main/main"))()
 
 -- UIShadow's BlurRadius is a real (GPU) blur post-effect — cheap for one
 -- small shadow, but can add up if it's on a big window plus several popups
@@ -512,14 +512,6 @@ end
 local function TryFindIcons()
 	if NovaUI.Icons then
 		return NovaUI.Icons
-	end
-	local ok, mod = pcall(function()
-		local found = ReplicatedStorage:FindFirstChild("NovaIcons") or ReplicatedStorage:FindFirstChild("Icons")
-		return found and require(found)
-	end)
-	if ok and mod then
-		NovaUI.Icons = mod
-		return mod
 	end
 	return nil
 end
