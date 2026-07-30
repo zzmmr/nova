@@ -993,16 +993,13 @@ function NovaUI:CreateWindow(config)
 	-- Bottom-right squared off since that's where the resize grip sits.
 	Round(Main, 14, { BottomRight = 0 })
 	Stroke(Main, theme.Border, 1)
-	-- Blur = 0 on purpose: unlike every other AddShadow() call in this file
-	-- (dialogs, popups, notifications), this one is on Main itself — it
-	-- renders continuously for the entire time the window is open, not just
-	-- while some transient popup is visible, so BlurRadius (the actual
-	-- expensive part of a UIShadow — a real per-frame GPU blur) is the one
-	-- confirmed to cause the "only happens while the window is open" lag.
-	-- Blur = 0 keeps the shadow itself visible (a flat, hard-edged offset
-	-- shadow, still gives Main some depth) without that per-frame blur cost
-	-- — no need for ReducedEffects just to make this one shadow cheap.
-	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 0 })
+	-- Normal soft/blurred shadow, same as everywhere else in the file — the
+	-- earlier flat/hard-edged Blur = 0 version here was working around what
+	-- turned out to be a different bug entirely (fullscreen's ViewportSize
+	-- tracking wasn't debounced, see Window:ToggleFullscreen), not the blur
+	-- itself, so there's no reason for Main's shadow to look different from
+	-- every dialog/popup/notification shadow anymore.
+	local Shadow = AddShadow(Main, { Transparency = 1, OffsetY = 10, Blur = 24 })
 	local mainScale = New("UIScale", { Scale = 0.97, Parent = Main })
 
 	-- Opening animation: a restrained fade + tiny scale-up (no bounce).
