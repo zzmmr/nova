@@ -1,6 +1,6 @@
 local SaveManager = {}
 
-function SaveManager.new(Window)
+function SaveManager.new(Window, Nova)
   if isfolder("Overflow/Games/"..game.GameId) then 
     local formatted = {}
 
@@ -16,6 +16,11 @@ end
 
 Window.ConfigSelector:OnChanged(function(name)
     Window:LoadConfig(readfile("Overflow/Games/" .. game.GameId .. "/"..name..".txt"))
+    Nova:Notify({
+      Title = "Overflow",
+      Content = "Loaded " .. name .. "config.",
+      Duration = 5,
+    })
 end)
 
 Window.ConfigSelector:OnSave(function(name, json)
@@ -23,6 +28,11 @@ Window.ConfigSelector:OnSave(function(name, json)
         return
     end 
     writefile("Overflow/Games/"..game.GameId.."/"..name.. ".txt", json)
+    Nova:Notify({
+      Title = "Overflow",
+      Content = "Saved " .. name .. "config.",
+      Duration = 5,
+    })
     return true 
 end)
 
@@ -38,6 +48,11 @@ Window.ConfigSelector:OnCreate(function(name, json)
     end 
     writefile("Overflow/Games/"..game.GameId.."/"..name.. ".txt", json)
     Window.ConfigSelector:AddOption(name)
+    Nova:Notify({
+      Title = "Overflow",
+      Content = "Created " .. name .. "config.",
+      Duration = 5,
+    })
     return true 
 end)
 end
