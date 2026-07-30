@@ -18,7 +18,7 @@ Window.ConfigSelector:OnChanged(function(name)
     Window:LoadConfig(readfile("Overflow/Games/" .. game.GameId .. "/"..name..".txt"))
     Nova:Notify({
       Title = "Overflow",
-      Content = "Loaded " .. name .. "config.",
+      Content = "Loaded " .. name .. " config.",
       Duration = 5,
     })
 end)
@@ -30,7 +30,7 @@ Window.ConfigSelector:OnSave(function(name, json)
     writefile("Overflow/Games/"..game.GameId.."/"..name.. ".txt", json)
     Nova:Notify({
       Title = "Overflow",
-      Content = "Saved " .. name .. "config.",
+      Content = "Saved " .. name .. " config.",
       Duration = 5,
     })
     return true 
@@ -50,7 +50,7 @@ Window.ConfigSelector:OnCreate(function(name, json)
     Window.ConfigSelector:AddOption(name)
     Nova:Notify({
       Title = "Overflow",
-      Content = "Created " .. name .. "config.",
+      Content = "Created " .. name .. " config.",
       Duration = 5,
     })
     return true 
