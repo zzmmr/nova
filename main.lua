@@ -1541,9 +1541,15 @@ function NovaUI:CreateWindow(config)
 	-- over that slot in TopBarRow's layout.
 	--=========================================================================
 
+	-- AutomaticSize.X (not a full-width 1,0 Size) is deliberate: this row
+	-- sits in the same UIListLayout as TopBarSpacer/ChromeRow, so it has to
+	-- size to its own content and let the spacer eat the rest of the row —
+	-- otherwise it claims the whole TopBarRow width and shoves ChromeRow
+	-- (minimize/fullscreen/close) off-screen to the right.
 	local MinimizedInfoRow = New("Frame", {
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 1, 0),
 		LayoutOrder = 1,
 		Visible = false,
 		Parent = TopBarRow,
@@ -1552,18 +1558,18 @@ function NovaUI:CreateWindow(config)
 		SortOrder = Enum.SortOrder.LayoutOrder,
 		FillDirection = Enum.FillDirection.Horizontal,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0, 8),
+		Padding = UDim.new(0, 12),
 		Parent = MinimizedInfoRow,
 	})
 
 	do
 		local logo = New("Frame", {
 			BackgroundTransparency = 1,
-			Size = UDim2.new(0, 22, 0, 22),
+			Size = UDim2.new(0, 32, 0, 32),
 			LayoutOrder = 1,
 			Parent = MinimizedInfoRow,
 		})
-		local icon = config.Logo and GetIcon(config.Logo, 22)
+		local icon = config.Logo and GetIcon(config.Logo, 32)
 		if icon then
 			icon.Size = UDim2.new(1, 0, 1, 0)
 			icon.Parent = logo
@@ -1571,7 +1577,7 @@ function NovaUI:CreateWindow(config)
 			New("TextLabel", {
 				Text = (config.Title or "N"):sub(1, 1):upper(),
 				Font = Enum.Font.GothamBold,
-				TextSize = 13,
+				TextSize = 18,
 				TextColor3 = theme.Text,
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, 0, 1, 0),
@@ -1583,7 +1589,7 @@ function NovaUI:CreateWindow(config)
 	New("TextLabel", {
 		Text = config.Title or "Window",
 		Font = Enum.Font.GothamBold,
-		TextSize = 13,
+		TextSize = 17,
 		TextColor3 = theme.Text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
@@ -1608,10 +1614,10 @@ function NovaUI:CreateWindow(config)
 			SortOrder = Enum.SortOrder.LayoutOrder,
 			FillDirection = Enum.FillDirection.Horizontal,
 			VerticalAlignment = Enum.VerticalAlignment.Center,
-			Padding = UDim.new(0, 4),
+			Padding = UDim.new(0, 5),
 			Parent = holder,
 		})
-		local icon = GetIcon(iconName, 13)
+		local icon = GetIcon(iconName, 17)
 		if icon then
 			icon.LayoutOrder = 1
 			icon.ImageColor3 = theme.SubText
@@ -1620,7 +1626,7 @@ function NovaUI:CreateWindow(config)
 			New("TextLabel", {
 				Text = fallbackGlyph,
 				Font = Enum.Font.GothamBold,
-				TextSize = 12,
+				TextSize = 15,
 				TextColor3 = theme.SubText,
 				BackgroundTransparency = 1,
 				AutomaticSize = Enum.AutomaticSize.X,
@@ -1632,7 +1638,7 @@ function NovaUI:CreateWindow(config)
 		local label = New("TextLabel", {
 			Text = "--",
 			Font = Enum.Font.GothamMedium,
-			TextSize = 12,
+			TextSize = 15,
 			TextColor3 = theme.SubText,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			BackgroundTransparency = 1,
@@ -1644,7 +1650,7 @@ function NovaUI:CreateWindow(config)
 		return label
 	end
 
-	local FpsLabel = CreateStat(3, "lightning", "!")
+	local FpsLabel = CreateStat(3, "gauge", "!")
 	local PingLabel = CreateStat(4, "wifi", "~")
 
 	-- FPS/ping only get measured while the info row is actually visible
@@ -1676,6 +1682,9 @@ function NovaUI:CreateWindow(config)
 
 	MakeDraggable(Main, LogoBox, Track)
 	MakeDraggable(Main, TopBarSpacer, Track)
+	-- The minimized-mode info row (logo/title/stats) replaces TopBarSpacer's
+	-- normal drag area while minimized, so it needs its own drag handle too.
+	MakeDraggable(Main, MinimizedInfoRow, Track)
 
 	local PagesContainer = New("Frame", {
 		Name = "Pages",
