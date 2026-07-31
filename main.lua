@@ -1714,6 +1714,13 @@ function NovaUI:CreateWindow(config)
 			Window:Destroy()
 			return
 		end
+		-- The confirm dialog is sized/positioned relative to Main, so on the
+		-- collapsed minimized bar it'd render cramped into that tiny strip.
+		-- Restore first — the dialog then opens on (and grows along with)
+		-- the full-size window instead.
+		if Window._minimized then
+			Window:ToggleMinimize()
+		end
 		Window:Dialog({
 			Title = "Close window?",
 			Content = "This will close " .. (config.Title or "the UI") .. ".",
@@ -2267,8 +2274,10 @@ function NovaUI:CreateWindow(config)
 			if t._fallbackLabel then
 				t._fallbackLabel.TextColor3 = active and theme.Text or theme.SubText
 			end
-			if t._iconGlow then
-				Tween(t._iconGlow, { Transparency = active and 0.35 or 1 }, 0.1)
+			if active then
+				if t._startGlowPulse then t._startGlowPulse() end
+			elseif t._stopGlowPulse then
+				t._stopGlowPulse()
 			end
 		end
 		ApplySearchFilter()
@@ -2281,7 +2290,18 @@ function NovaUI:CreateWindow(config)
 	--- Buttons are the flat/ghost secondary style by default; set
 	--- Main = true on (usually) one button to render it as the primary
 	--- solid-accent action instead — same fill as Section:AddButton.
+	--- Only one dialog can be open at a time: calling this while one is
+	--- already up (e.g. a button that opens one got double-clicked before
+	--- the first click's dialog finished appearing) immediately closes the
+	--- old one — no fade, it's being superseded, not dismissed — instead of
+	--- stacking a second overlay on top of it.
+	local currentDialogOverlay = nil
 	function Window:Dialog(cfg)
+		if currentDialogOverlay then
+			currentDialogOverlay:Destroy()
+			currentDialogOverlay = nil
+		end
+
 		local overlay = New("Frame", {
 			BackgroundColor3 = Color3.new(0, 0, 0),
 			BackgroundTransparency = 1,
@@ -2289,6 +2309,7 @@ function NovaUI:CreateWindow(config)
 			ZIndex = 50,
 			Parent = Main,
 		})
+		currentDialogOverlay = overlay
 		-- Main's own ClipsDescendants only clips children to its rectangular
 		-- bounds, not its rounded shape — UICorner isn't respected by
 		-- ClipsDescendants at all. Without its own matching UICorner here,
@@ -2440,6 +2461,12 @@ function NovaUI:CreateWindow(config)
 			end
 			AddHoverFade(btn, 0, isMain and 0.3 or 0.5)
 			btn.MouseButton1Click:Connect(function()
+				-- Only clear the tracked reference if a newer Dialog() call
+				-- hasn't already superseded (and reassigned) it out from
+				-- under this one.
+				if currentDialogOverlay == overlay then
+					currentDialogOverlay = nil
+				end
 				Tween(overlay, { BackgroundTransparency = 1 }, 0.12)
 				Tween(boxScale, { Scale = 0.96 }, 0.12)
 				Tween(box, { BackgroundTransparency = 1 }, 0.12)
@@ -2507,6 +2534,39 @@ function NovaUI:CreateWindow(config)
 			Blur = 14,
 		})
 
+		-- Slow "breathing" pulse for the active tab's icon glow — loops
+		-- between a dim and a bright transparency on a slow (~1.1s/leg)
+		-- sine tween the whole time the tab stays selected, same
+		-- start/stop-a-loop-via-an-external-flag shape as the Keybind
+		-- listening-pulse further down the file. `pulsing` (not just
+		-- whether glowPulseTween is set) is what the Completed callbacks
+		-- check, since a Cancel()'d tween still fires Completed once.
+		local pulsing = false
+		local glowPulseTween
+		local function StopGlowPulse()
+			pulsing = false
+			if glowPulseTween then
+				glowPulseTween:Cancel()
+				glowPulseTween = nil
+			end
+			if iconGlow.Parent then
+				Tween(iconGlow, { Transparency = 1 }, 0.15)
+			end
+		end
+		local function StartGlowPulse()
+			if pulsing or not iconGlow.Parent then return end
+			pulsing = true
+			local function PulseTo(target)
+				glowPulseTween = Tween(iconGlow, { Transparency = target }, 1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+				glowPulseTween.Completed:Connect(function()
+					if pulsing then
+						PulseTo(target == 0.55 and 0.2 or 0.55)
+					end
+				end)
+			end
+			PulseTo(0.55)
+		end
+
 		AttachTooltip(button, tabConfig.Title or ("Tab " .. tabIndex))
 
 		button.MouseEnter:Connect(function()
@@ -2539,7 +2599,11 @@ function NovaUI:CreateWindow(config)
 		-- computed straight from page.AbsoluteSize with no ambiguity.
 		local PAGE_PAD_LEFT, PAGE_PAD_TOP, PAGE_PAD_RIGHT, PAGE_PAD_BOTTOM = 20, 4, 20, 20
 
-		local Tab = { _page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel, _iconGlow = iconGlow, _columns = nil, _columnsFrame = nil }
+		local Tab = {
+			_page = page, _button = button, _icon = iconImage, _fallbackLabel = fallbackLabel,
+			_iconGlow = iconGlow, _startGlowPulse = StartGlowPulse, _stopGlowPulse = StopGlowPulse,
+			_columns = nil, _columnsFrame = nil,
+		}
 
 		button.MouseButton1Click:Connect(function()
 			Window:SelectTab(tabIndex)
@@ -2549,7 +2613,7 @@ function NovaUI:CreateWindow(config)
 			button.BackgroundTransparency = 0.8
 			if iconImage then iconImage.ImageColor3 = activeIconColor end
 			if fallbackLabel then fallbackLabel.TextColor3 = theme.Text end
-			iconGlow.Transparency = 0.35
+			StartGlowPulse()
 		end
 
 		--=====================================================================
