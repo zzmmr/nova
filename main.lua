@@ -2556,15 +2556,23 @@ function NovaUI:CreateWindow(config)
 		local function StartGlowPulse()
 			if pulsing or not iconGlow.Parent then return end
 			pulsing = true
+			-- Snap straight to visible instead of starting the loop with a
+			-- slow 1.1s fade-in from fully transparent — that first leg made
+			-- selecting a tab look like the glow hadn't started at all for
+			-- almost a full second. It's instantly there now; the loop below
+			-- is purely the breathing motion from that point on. Also pulls
+			-- both ends of the loop toward less transparent (0.15/0.4 instead
+			-- of 0.2/0.55) so the whole thing reads as more visible glow.
+			iconGlow.Transparency = 0.15
 			local function PulseTo(target)
 				glowPulseTween = Tween(iconGlow, { Transparency = target }, 1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
 				glowPulseTween.Completed:Connect(function()
 					if pulsing then
-						PulseTo(target == 0.55 and 0.2 or 0.55)
+						PulseTo(target == 0.15 and 0.4 or 0.15)
 					end
 				end)
 			end
-			PulseTo(0.55)
+			PulseTo(0.4)
 		end
 
 		AttachTooltip(button, tabConfig.Title or ("Tab " .. tabIndex))
