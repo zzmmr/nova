@@ -3622,7 +3622,11 @@ function NovaUI:CreateWindow(config)
 			--- with the new bound value only when the BOUND KEY itself is
 			--- changed — clicking the button and pressing a new key/mouse
 			--- button, or calling :SetValue(value) in code — same value
-			--- `ChangedCallback` gets.
+			--- `ChangedCallback` gets. `ChangedCallback` also fires once at
+			--- creation with `Default`, so it sees the binding the keybind
+			--- loaded with and not just later rebinds. (Only the callback: an
+			--- :OnKeybindChanged handler can't be connected until after this
+			--- returns.)
 			--- `Default`/`Value`/the value passed to :SetValue() and to
 			--- ChangedCallback are real Enum items, not strings: an
 			--- Enum.KeyCode item for keyboard keys (e.g. Enum.KeyCode.F), or
@@ -3663,6 +3667,16 @@ function NovaUI:CreateWindow(config)
 					_state = false,
 					_listening = false,
 				}
+
+				-- Fire once at creation with the starting binding, the same way
+				-- Toggle/Dropdown announce their defaults. Without this, anything
+				-- mirroring the bind (a HUD label, the consumer's own input
+				-- handler) only ever hears about rebinds and never learns what
+				-- the keybind loaded as. Fires with nil for an unbound keybind —
+				-- that IS its starting value, and KeybindDisplayName renders it
+				-- as "None".
+				Keybind.KeybindChanged:Fire(Keybind.Value)
+				if cfg.ChangedCallback then cfg.ChangedCallback(Keybind.Value) end
 
 				function Keybind:OnChanged(fn) Keybind.Changed:Connect(fn) end
 				function Keybind:OnKeybindChanged(fn) Keybind.KeybindChanged:Connect(fn) end
