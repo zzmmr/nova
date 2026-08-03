@@ -405,6 +405,22 @@ local function SerializeValue(value)
 		-- Keybind values are real Enum.KeyCode / Enum.UserInputType items now,
 		-- neither of which HttpService:JSONEncode can serialize directly.
 		return { __type = "EnumItem", EnumType = tostring(value.EnumType):gsub("^Enum%.", ""), Name = value.Name }
+	elseif typeof(value) == "table" then
+		-- Multi-select dropdown map. Its keys are the raw Values entries, which
+		-- may be Instances (or anything else JSONEncode chokes on, and non-string
+		-- keys are unencodable regardless), so it goes out as a plain array of
+		-- selected option names. Dropdown:SetValue resolves names back to the
+		-- live entries on the way in.
+		local names = {}
+		for option, on in pairs(value) do
+			if on then table.insert(names, tostring(option)) end
+		end
+		table.sort(names)
+		return names
+	elseif value ~= nil and typeof(value) ~= "string" and typeof(value) ~= "number" and typeof(value) ~= "boolean" then
+		-- Single-select dropdown holding an object entry (a part, a player, ...)
+		-- — same deal: stored by name, resolved back by SetValue.
+		return tostring(value)
 	end
 	return value
 end
@@ -3028,13 +3044,17 @@ function NovaUI:CreateWindow(config)
 			end
 
 			--- Section:AddDropdown(id, { Title, Description, Values, Multi, Default, Elevated, Callback })
+			--- Values entries don't have to be strings: hand it a list of
+			--- Instances (parts, players, ...) and Value/Changed/Callback give
+			--- back those objects, not their names. Only the option label is
+			--- stringified.
 			function Section:AddDropdown(id, cfg)
 				cfg = cfg or {}
 				local values = cfg.Values or {}
 				local multi = cfg.Multi or false
 				local controlWidth = 130
 
-				-- Values are matched/displayed by tostring(name), so entries
+				-- Options are keyed/displayed by tostring(name), so entries
 				-- that stringify the same (duplicate names, or duplicate
 				-- instances with the same .Name) collapse into a single
 				-- option rather than listing repeats.
@@ -3142,43 +3162,75 @@ function NovaUI:CreateWindow(config)
 				-- silently re-highlights a split second later — with several
 				-- options passed over quickly, they can all end up stuck lit.
 				local hoverTweens = {}
+				-- tostring(entry) -> the raw entry from Values. Buttons, hover
+				-- tweens and highlights are all keyed by that string, but the
+				-- object behind it is what Dropdown.Value holds, so a dropdown
+				-- built from parts hands parts back to the callback.
+				local optionByKey = {}
+				-- Accepts either an entry itself or the name of one (from a
+				-- saved config, or just for convenience) and returns the live
+				-- entry. Values that don't name an option pass through
+				-- untouched, so SetValue still works ahead of SetOptions.
+				local function ResolveOption(value)
+					if value == nil then return nil end
+					local option = optionByKey[tostring(value)]
+					if option ~= nil then return option end
+					return value
+				end
+				local function IsSelected(key)
+					local option = optionByKey[key]
+					if option == nil then return false end
+					if multi then
+						return (Dropdown.Value or {})[option] and true or false
+					end
+					return Dropdown.Value ~= nil and tostring(Dropdown.Value) == key
+				end
 				local function LabelForValue()
 					if multi then
 						local names = {}
-						for name, on in pairs(Dropdown.Value or {}) do
-							if on then table.insert(names, name) end
+						for option, on in pairs(Dropdown.Value or {}) do
+							if on then table.insert(names, tostring(option)) end
 						end
 						return #names > 0 and table.concat(names, ", ") or "..."
 					else
-						return tostring(Dropdown.Value or "...")
+						return Dropdown.Value ~= nil and tostring(Dropdown.Value) or "..."
 					end
 				end
 				local function RefreshButton() ddLabel.Text = LabelForValue() end
 				local function RefreshHighlights()
-					for name, btn in pairs(Dropdown._optionButtons) do
-						if hoverTweens[name] then
-							hoverTweens[name]:Cancel()
-							hoverTweens[name] = nil
+					for key, btn in pairs(Dropdown._optionButtons) do
+						if hoverTweens[key] then
+							hoverTweens[key]:Cancel()
+							hoverTweens[key] = nil
 						end
-						local active = multi and Dropdown.Value[name] or (Dropdown.Value == name)
+						local active = IsSelected(key)
 						btn.BackgroundTransparency = active and 0.85 or 1
 						btn.TextColor3 = active and theme.Accent or theme.Text
 					end
 				end
 				function Dropdown:OnChanged(fn) Dropdown.Changed:Connect(fn) end
+				--- Dropdown:SetValue(value) — value may be an entry from Values
+				--- or its name; either way Dropdown.Value ends up holding the
+				--- entry. Multi-select takes a list or a map and keys the
+				--- resulting map by entry too.
 				function Dropdown:SetValue(value)
 					if multi then
 						local map = {}
 						if typeof(value) == "table" then
-							if value[1] ~= nil then
-								for _, name in ipairs(value) do map[name] = true end
+							-- List of entries, or an entry -> selected map. Keys
+							-- are entries now, so a numeric option leaves a map
+							-- with a value[1] of its own; the tie-breaker is that
+							-- a map always stores a boolean there, a list never
+							-- does.
+							if value[1] ~= nil and typeof(value[1]) ~= "boolean" then
+								for _, name in ipairs(value) do map[ResolveOption(name)] = true end
 							else
-								for name, on in pairs(value) do map[name] = on end
+								for name, on in pairs(value) do map[ResolveOption(name)] = on end
 							end
 						end
 						Dropdown.Value = map
 					else
-						Dropdown.Value = value
+						Dropdown.Value = ResolveOption(value)
 					end
 					RefreshButton()
 					RefreshHighlights()
@@ -3204,11 +3256,12 @@ function NovaUI:CreateWindow(config)
 					})
 					Round(optBtn, 4)
 					Pad(optBtn, 8, 0, 8, 0)
-					Dropdown._optionButtons[tostring(name)] = optBtn
 					local optKey = tostring(name)
+					Dropdown._optionButtons[optKey] = optBtn
+					optionByKey[optKey] = name
 					optBtn.MouseEnter:Connect(function()
 						if hoverTweens[optKey] then hoverTweens[optKey]:Cancel() end
-						if not (multi and Dropdown.Value[optKey]) and Dropdown.Value ~= optKey then
+						if not IsSelected(optKey) then
 							hoverTweens[optKey] = Tween(optBtn, { BackgroundTransparency = 0.92 }, 0.08)
 						end
 					end)
@@ -3221,13 +3274,12 @@ function NovaUI:CreateWindow(config)
 					end)
 					optBtn.MouseButton1Click:Connect(function()
 						if multi then
-							local key = tostring(name)
 							local newMap = {}
-							for k, v in pairs(Dropdown.Value) do newMap[k] = v end
-							newMap[key] = not newMap[key]
+							for k, v in pairs(Dropdown.Value or {}) do newMap[k] = v end
+							newMap[name] = not IsSelected(optKey)
 							Dropdown:SetValue(newMap)
 						else
-							Dropdown:SetValue(tostring(name))
+							Dropdown:SetValue(name)
 							ClosePopup()
 						end
 					end)
@@ -3248,6 +3300,7 @@ function NovaUI:CreateWindow(config)
 					values = list or {}
 					for _, btn in pairs(Dropdown._optionButtons) do btn:Destroy() end
 					Dropdown._optionButtons = {}
+					optionByKey = {}
 					for key, tw in pairs(hoverTweens) do
 						tw:Cancel()
 						hoverTweens[key] = nil
@@ -3258,14 +3311,18 @@ function NovaUI:CreateWindow(config)
 						end
 					end
 					listFrame.Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(CountUniqueNames(values), 6) * 28 + 8)
+					-- Selections carry over by name, so a rebuilt list re-points
+					-- Value at the *new* list's entry rather than keeping a
+					-- reference to the old (possibly destroyed) object.
 					if multi then
 						local survivors = {}
 						for name, on in pairs(Dropdown.Value or {}) do
-							if on and table.find(values, name) then survivors[name] = true end
+							local option = optionByKey[tostring(name)]
+							if on and option ~= nil then survivors[option] = true end
 						end
 						Dropdown.Value = survivors
-					elseif Dropdown.Value ~= nil and not table.find(values, Dropdown.Value) then
-						Dropdown.Value = nil
+					elseif Dropdown.Value ~= nil then
+						Dropdown.Value = optionByKey[tostring(Dropdown.Value)]
 					end
 					RefreshButton()
 					RefreshHighlights()
