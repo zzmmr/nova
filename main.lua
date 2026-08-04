@@ -2773,11 +2773,32 @@ function NovaUI:CreateWindow(config)
 			-- Shared row shell used by every Section:AddX method below.
 			-- `controlWidth` is how much horizontal space to reserve on the
 			-- right for that row's control.
-			local function CreateRow(rowCfg, controlWidth)
+			-- `stacked` puts the control on its own full-width line *under* the
+			-- title/description instead of inline to the right of it, for
+			-- controls that need the room (a dropdown's selection is unreadable
+			-- squeezed into 130px, especially multi-select). `controlWidth` is
+			-- ignored for stacked rows — the control gets the full width.
+			local STACKED_GAP = 6
+			local STACKED_CONTROL_HEIGHT = 26
+			local function CreateRow(rowCfg, controlWidth, stacked)
 				rowCfg = rowCfg or {}
 				local elevated = rowCfg.Elevated and true or false
 				local hasDescription = rowCfg.Description ~= nil and rowCfg.Description ~= ""
-				local rowHeight = elevated and 44 or (hasDescription and 40 or 32)
+				-- Title label is 16px, description another 14 — inline rows
+				-- center that block in a fixed height, stacked rows measure it
+				-- so the control can sit directly beneath.
+				local labelHeight = hasDescription and 30 or 16
+				local padX = elevated and 12 or 4
+				-- Inline rows get their breathing room from the fixed row
+				-- height; a stacked row's height is derived, so the padding has
+				-- to be real instead.
+				local padY = stacked and (elevated and 10 or 6) or 0
+				local rowHeight
+				if stacked then
+					rowHeight = padY * 2 + labelHeight + STACKED_GAP + STACKED_CONTROL_HEIGHT
+				else
+					rowHeight = elevated and 44 or (hasDescription and 40 or 32)
+				end
 
 				Section._rowCount = Section._rowCount + 1
 				local row = New("Frame", {
@@ -2788,7 +2809,7 @@ function NovaUI:CreateWindow(config)
 					Parent = sectionFrame,
 				})
 				Round(row, 8)
-				Pad(row, elevated and 12 or 4, 0, elevated and 12 or 4, 0)
+				Pad(row, padX, padY, padX, padY)
 
 				-- Every row gets a restrained fade+rise on creation, and a
 				-- subtle hover highlight — modern, not bouncy.
@@ -2815,7 +2836,10 @@ function NovaUI:CreateWindow(config)
 
 				local labelBox = New("Frame", {
 					BackgroundTransparency = 1,
-					Size = UDim2.new(1, -(controlWidth + 10), 1, 0),
+					-- Stacked: full width, pinned to the top, only as tall as
+					-- the labels. Inline: full height minus the reserved
+					-- control strip on the right.
+					Size = stacked and UDim2.new(1, 0, 0, labelHeight) or UDim2.new(1, -(controlWidth + 10), 1, 0),
 					Parent = row,
 				})
 				New("UIListLayout", {
@@ -2850,30 +2874,39 @@ function NovaUI:CreateWindow(config)
 
 				local controlHolder = New("Frame", {
 					BackgroundTransparency = 1,
-					AnchorPoint = Vector2.new(1, 0.5),
-					Position = UDim2.new(1, 0, 0.5, 0),
-					Size = UDim2.new(0, controlWidth, 1, 0),
+					-- Stacked rows hang the control off the bottom edge (the
+					-- gap under the labels falls out of the derived height);
+					-- inline rows pin it right and vertically centered.
+					AnchorPoint = stacked and Vector2.new(0, 1) or Vector2.new(1, 0.5),
+					Position = stacked and UDim2.new(0, 0, 1, 0) or UDim2.new(1, 0, 0.5, 0),
+					Size = stacked and UDim2.new(1, 0, 0, STACKED_CONTROL_HEIGHT) or UDim2.new(0, controlWidth, 1, 0),
 					Parent = row,
 				})
 				New("UIListLayout", {
 					SortOrder = Enum.SortOrder.LayoutOrder,
 					FillDirection = Enum.FillDirection.Horizontal,
-					HorizontalAlignment = Enum.HorizontalAlignment.Right,
+					HorizontalAlignment = stacked and Enum.HorizontalAlignment.Left or Enum.HorizontalAlignment.Right,
 					VerticalAlignment = Enum.VerticalAlignment.Center,
 					Padding = UDim.new(0, 8),
 					Parent = controlHolder,
 				})
 
 				if rowCfg.Menu then
+					-- On a stacked row the bottom strip belongs entirely to the
+					-- full-width control, so the menu button goes top-right
+					-- alongside the title instead of sharing that strip (where
+					-- the list layout would shove the control off the row).
 					local menuBtn = New("TextButton", {
 						Text = "\226\139\175",
 						Font = Enum.Font.GothamBold,
 						TextSize = 14,
 						TextColor3 = theme.SubText,
 						BackgroundTransparency = 1,
+						AnchorPoint = stacked and Vector2.new(1, 0) or Vector2.new(0, 0),
+						Position = stacked and UDim2.new(1, 0, 0, 0) or UDim2.new(0, 0, 0, 0),
 						Size = UDim2.new(0, 20, 0, 20),
 						LayoutOrder = -1,
-						Parent = controlHolder,
+						Parent = stacked and row or controlHolder,
 					})
 					if rowCfg.MenuCallback then
 						menuBtn.MouseButton1Click:Connect(rowCfg.MenuCallback)
@@ -3048,11 +3081,18 @@ function NovaUI:CreateWindow(config)
 			--- Instances (parts, players, ...) and Value/Changed/Callback give
 			--- back those objects, not their names. Only the option label is
 			--- stringified.
+			--- Lays out taller than the other controls: the button sits on its
+			--- own line under the title/description and spans the full width of
+			--- the section, since a selection (especially a multi-select one)
+			--- doesn't read in the ~130px an inline control gets.
 			function Section:AddDropdown(id, cfg)
 				cfg = cfg or {}
 				local values = cfg.Values or {}
 				local multi = cfg.Multi or false
-				local controlWidth = 130
+				-- Only a floor for the popup's width before the button has been
+				-- measured — the button itself is full-width on its own line
+				-- under the title, not a fixed-width box beside it.
+				local minPopupWidth = 160
 
 				-- Options are keyed/displayed by tostring(name), so entries
 				-- that stringify the same (duplicate names, or duplicate
@@ -3070,14 +3110,14 @@ function NovaUI:CreateWindow(config)
 					return count
 				end
 
-				local _, controlHolder = CreateRow(cfg, controlWidth)
+				local _, controlHolder = CreateRow(cfg, nil, true)
 
 				local ddBtn = New("TextButton", {
 					Text = "",
 					BackgroundColor3 = theme.ElementBackgroundHover,
 					BackgroundTransparency = 0,
 					AutoButtonColor = false,
-					Size = UDim2.new(0, controlWidth, 0, 26),
+					Size = UDim2.new(1, 0, 1, 0),
 					LayoutOrder = 1,
 					Parent = controlHolder,
 				})
@@ -3127,14 +3167,21 @@ function NovaUI:CreateWindow(config)
 					end
 				end
 
-				-- Fixed-width, fully opaque popup — rendered in Overlay so it's
-				-- never occluded by (or bleeding through) later sections/rows.
+				-- Fully opaque popup — rendered in Overlay so it's never occluded
+				-- by (or bleeding through) later sections/rows. Its width has to
+				-- be a real offset (OpenPopup places it off Size.X.Offset), so
+				-- it's re-measured from the button on every open rather than
+				-- scaled; until the button has been laid out once, the floor
+				-- below stands in.
+				local function ListHeight()
+					return math.min(CountUniqueNames(values), 6) * 28 + 8
+				end
 				local listFrame = New("Frame", {
 					BackgroundColor3 = theme.PopupBackground,
 					BackgroundTransparency = 0,
 					Visible = false,
 					ClipsDescendants = true,
-					Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(CountUniqueNames(values), 6) * 28 + 8),
+					Size = UDim2.new(0, minPopupWidth, 0, ListHeight()),
 					Parent = Overlay,
 				})
 				Round(listFrame, 6)
@@ -3310,7 +3357,7 @@ function NovaUI:CreateWindow(config)
 							CreateOptionButton(name, i)
 						end
 					end
-					listFrame.Size = UDim2.new(0, math.max(controlWidth, 160), 0, math.min(CountUniqueNames(values), 6) * 28 + 8)
+					listFrame.Size = UDim2.new(0, listFrame.Size.X.Offset, 0, ListHeight())
 					-- Selections carry over by name, so a rebuilt list re-points
 					-- Value at the *new* list's entry rather than keeping a
 					-- reference to the old (possibly destroyed) object.
@@ -3329,8 +3376,14 @@ function NovaUI:CreateWindow(config)
 				end
 
 				ddBtn.MouseButton1Click:Connect(function()
+					-- Match the popup to the button it drops out of, now that the
+					-- button's width comes from the section rather than a
+					-- constant. Measured here because AbsoluteSize isn't known
+					-- until the row has been laid out, and it changes with the
+					-- window / column count.
+					listFrame.Size = UDim2.new(0, math.max(ddBtn.AbsoluteSize.X, minPopupWidth), 0, ListHeight())
 					OpenPopup(listFrame, ddBtn, {
-						Align = "right",
+						Align = "left",
 						GrowHeight = true,
 						OnClose = function()
 							Tween(chevron, { Rotation = 0 }, 0.12)
