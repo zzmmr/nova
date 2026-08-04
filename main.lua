@@ -873,11 +873,9 @@ function NovaUI:CreateWindow(config)
 	local railWidth = config.TabWidth or 64
 	local topBarHeight = 64
 
-	-- The search / config-selector cluster in the top bar. Sits a couple of
-	-- pixels inside the row rather than filling it edge to edge, and kept in
-	-- one place so the two pills and the icon buttons beside them can't drift
-	-- out of alignment with each other.
-	local topBarControlHeight = 30
+	-- The search / config-selector pills in the top bar. Both still fill the
+	-- row's height; only their width is set here (the selector's popup is
+	-- pinned to the same number so it stays flush with the pill).
 	local searchPillWidth = 132
 	local selectorPillWidth = 138
 
@@ -1333,7 +1331,7 @@ function NovaUI:CreateWindow(config)
 	-- next to the selector needs the room in the top bar).
 	local SearchPill = New("Frame", {
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, searchPillWidth, 0, topBarControlHeight),
+		Size = UDim2.new(0, searchPillWidth, 1, 0),
 		LayoutOrder = 1,
 		Parent = TopBarRow,
 	})
@@ -1385,7 +1383,7 @@ function NovaUI:CreateWindow(config)
 	local SelectorPill = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, selectorPillWidth, 0, topBarControlHeight),
+		Size = UDim2.new(0, selectorPillWidth, 1, 0),
 		AutoButtonColor = false,
 		LayoutOrder = 2,
 		ZIndex = 2,
@@ -1489,7 +1487,7 @@ function NovaUI:CreateWindow(config)
 	local CreateConfigBtn = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, topBarControlHeight, 0, topBarControlHeight),
+		Size = UDim2.new(0, 36, 1, 0),
 		AutoButtonColor = false,
 		LayoutOrder = 3,
 		ZIndex = 2,
@@ -1512,7 +1510,7 @@ function NovaUI:CreateWindow(config)
 	local SaveConfigBtn = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, topBarControlHeight, 0, topBarControlHeight),
+		Size = UDim2.new(0, 36, 1, 0),
 		AutoButtonColor = false,
 		LayoutOrder = 4,
 		ZIndex = 2,
