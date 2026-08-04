@@ -873,6 +873,14 @@ function NovaUI:CreateWindow(config)
 	local railWidth = config.TabWidth or 64
 	local topBarHeight = 64
 
+	-- The search / config-selector cluster in the top bar. Sits a couple of
+	-- pixels inside the row rather than filling it edge to edge, and kept in
+	-- one place so the two pills and the icon buttons beside them can't drift
+	-- out of alignment with each other.
+	local topBarControlHeight = 30
+	local searchPillWidth = 132
+	local selectorPillWidth = 138
+
 	-- Every connection this window makes to a GLOBAL, persistent service
 	-- (UserInputService, Workspace) gets tracked here and explicitly
 	-- disconnected in Window:Destroy(). Destroying the ScreenGui only
@@ -1325,7 +1333,7 @@ function NovaUI:CreateWindow(config)
 	-- next to the selector needs the room in the top bar).
 	local SearchPill = New("Frame", {
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 150, 1, 0),
+		Size = UDim2.new(0, searchPillWidth, 0, topBarControlHeight),
 		LayoutOrder = 1,
 		Parent = TopBarRow,
 	})
@@ -1377,7 +1385,7 @@ function NovaUI:CreateWindow(config)
 	local SelectorPill = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 156, 1, 0),
+		Size = UDim2.new(0, selectorPillWidth, 0, topBarControlHeight),
 		AutoButtonColor = false,
 		LayoutOrder = 2,
 		ZIndex = 2,
@@ -1457,7 +1465,7 @@ function NovaUI:CreateWindow(config)
 		BackgroundTransparency = 0,
 		Visible = false,
 		ClipsDescendants = true,
-		Size = UDim2.new(0, 156, 0, 8),
+		Size = UDim2.new(0, selectorPillWidth, 0, 8),
 		Parent = Overlay,
 	})
 	Round(SelectorList, 8)
@@ -1481,7 +1489,7 @@ function NovaUI:CreateWindow(config)
 	local CreateConfigBtn = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 36, 1, 0),
+		Size = UDim2.new(0, topBarControlHeight, 0, topBarControlHeight),
 		AutoButtonColor = false,
 		LayoutOrder = 3,
 		ZIndex = 2,
@@ -1504,7 +1512,7 @@ function NovaUI:CreateWindow(config)
 	local SaveConfigBtn = New("TextButton", {
 		Text = "",
 		BackgroundColor3 = theme.ElementBackground,
-		Size = UDim2.new(0, 36, 1, 0),
+		Size = UDim2.new(0, topBarControlHeight, 0, topBarControlHeight),
 		AutoButtonColor = false,
 		LayoutOrder = 4,
 		ZIndex = 2,
@@ -2183,7 +2191,7 @@ function NovaUI:CreateWindow(config)
 	-- Caps how tall SelectorList grows before it scrolls instead — same
 	-- 6-row cap as the regular Dropdown.
 	local function RefreshSelectorListSize()
-		SelectorList.Size = UDim2.new(0, 156, 0, math.min(#ConfigSelector._options, 6) * 28 + 8)
+		SelectorList.Size = UDim2.new(0, selectorPillWidth, 0, math.min(#ConfigSelector._options, 6) * 28 + 8)
 	end
 
 	local function CreateOptionButton(name, layoutOrder)
