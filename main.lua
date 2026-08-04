@@ -967,26 +967,51 @@ function NovaUI:CreateWindow(config)
 	-- that reveals a darker glyph on hover — same feel as the real
 	-- close/minimize/zoom dots. `color` is also what the hover glyph is
 	-- derived from (darkened), so it always reads against its own dot.
+	--
+	-- The dot you see is 14px, but what actually takes the click is the
+	-- invisible box around it: a 14px target is fine for a mouse and far
+	-- under what a fingertip can reliably land on, and these three sit
+	-- shoulder to shoulder, so on a phone a near-miss on Minimize closes
+	-- the window instead. The hit box is the full height of the top bar
+	-- (that row is otherwise dead space) and TRAFFIC_HIT_WIDTH across.
+	local TRAFFIC_DOT_SIZE = 14
+	local TRAFFIC_HIT_WIDTH = 30
 	local function MakeTrafficLightButton(parent, color, iconName, fallbackGlyph, iconSize)
-		local dot = New("TextButton", {
+		local hit = New("TextButton", {
+			Text = "",
+			BackgroundTransparency = 1,
+			AutoButtonColor = false,
+			Size = UDim2.new(0, TRAFFIC_HIT_WIDTH, 1, 0),
+			Parent = parent,
+		})
+		-- A TextLabel, not a TextButton: a nested button would eat the clicks
+		-- that land on the dot itself (the common case) and never pass them
+		-- up to the hit box. SetButtonIcon only needs .Text/.TextColor3, both
+		-- of which a label has, and the fallback glyph renders the same.
+		local dot = New("TextLabel", {
 			Text = "",
 			BackgroundColor3 = color,
-			AutoButtonColor = false,
-			Size = UDim2.new(0, 14, 0, 14),
-			Parent = parent,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 0),
+			Size = UDim2.new(0, TRAFFIC_DOT_SIZE, 0, TRAFFIC_DOT_SIZE),
+			Parent = hit,
 		})
 		Pill(dot)
 		local glyphColor = color:Lerp(Color3.new(0, 0, 0), 0.55)
 		local state = { handle = SetButtonIcon(dot, iconName, fallbackGlyph, iconSize or 9, glyphColor) }
 		state.handle.Instance[state.handle.Property] = 1
-		dot.MouseEnter:Connect(function()
+		-- Hover is driven off the hit box, so the glyph reveals as soon as the
+		-- cursor is anywhere in the target — which doubles as the cue for how
+		-- big that target actually is.
+		hit.MouseEnter:Connect(function()
 			Tween(state.handle.Instance, { [state.handle.Property] = 0 }, 0.1)
 		end)
-		dot.MouseLeave:Connect(function()
+		hit.MouseLeave:Connect(function()
 			Tween(state.handle.Instance, { [state.handle.Property] = 1 }, 0.1)
 		end)
 		return {
-			Instance = dot,
+			Instance = hit,
+			Dot = dot,
 			SetIcon = function(name, fb)
 				state.handle = SetButtonIcon(dot, name, fb, iconSize or 9, glyphColor)
 				state.handle.Instance[state.handle.Property] = 1
@@ -1516,9 +1541,12 @@ function NovaUI:CreateWindow(config)
 	-- macOS-style traffic-light dots: always-visible solid color, with a
 	-- dark glyph that only shows up on hover (same as real macOS window
 	-- controls) instead of MakeIconButton's transparent-until-hover look.
+	-- Sized off the hit boxes, which are wider than the dots and butt right
+	-- up against each other — the gap between the dots is what's left over
+	-- inside them, so the layout adds no padding of its own on top.
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 58, 1, 0),
+		Size = UDim2.new(0, TRAFFIC_HIT_WIDTH * 3, 1, 0),
 		LayoutOrder = 6,
 		ZIndex = 2,
 		Parent = TopBarRow,
@@ -1528,7 +1556,7 @@ function NovaUI:CreateWindow(config)
 		FillDirection = Enum.FillDirection.Horizontal,
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0, 8),
+		Padding = UDim.new(0, 0),
 		Parent = ChromeRow,
 	})
 
