@@ -378,6 +378,20 @@ end
 
 NovaUI.Version = "2.0.0"
 NovaUI.Options = {}
+--- Every Section:AddX with an `id` registers here, and that id is the only
+--- handle ExportConfig/ApplyConfig have on the element. Reusing an id (easy
+--- to do by accident once a UI is big enough to span several tabs) used to
+--- silently drop the earlier element out of the table: it kept working on
+--- screen but stopped being saved, and a loaded config never pushed a value
+--- back into it, so it just sat there showing stale state. Still last-write-
+--- wins, but it says so now.
+local function RegisterOption(id, opt)
+	if id == nil then return end
+	if NovaUI.Options[id] ~= nil then
+		warn(string.format("[NovaUI] duplicate option id %q — only the last element registered under it will save/load", tostring(id)))
+	end
+	NovaUI.Options[id] = opt
+end
 NovaUI.Unloaded = false
 NovaUI.Theme = Themes.Dark
 NovaUI.Icons = loadstring(game:HttpGet("https://raw.githubusercontent.com/zzmmr/icons/refs/heads/main/main"))()
@@ -495,15 +509,38 @@ function NovaUI:ApplyConfig(data)
 	end
 	if type(data) ~= "table" then return false end
 
-	for id, rawValue in pairs(data) do
+	-- Applied in sorted id order rather than raw `pairs` order. pairs is
+	-- arbitrary, so when a load only half-lands it lands a *different* half
+	-- every time, which makes the failure look random and is miserable to
+	-- track down.
+	local ids = {}
+	for id in pairs(data) do
+		table.insert(ids, id)
+	end
+	table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
+
+	for _, id in ipairs(ids) do
 		local opt = NovaUI.Options[id]
 		if opt then
-			local value = DeserializeValue(rawValue)
-			if typeof(value) == "Color3" and opt.SetValueRGB then
-				opt:SetValueRGB(value)
-			elseif opt.SetValue then
-				opt:SetValue(value)
-			end
+			local value = DeserializeValue(data[id])
+			-- Each option is pushed on its own thread, because :SetValue runs
+			-- the option's Callback on whatever thread called it. Callbacks in
+			-- a UI like this routinely never return (`while on do task.wait()
+			-- ... end` farm loops) or error outright, and on a single shared
+			-- loop either one strands every option that hasn't been reached
+			-- yet — so a big config comes back with an arbitrary chunk of the
+			-- UI still showing its old state, and only the options that
+			-- happened to be applied before the offending one look right.
+			-- SetValue repaints before it fires the callback, so every
+			-- control's visual has already landed by the time its thread
+			-- yields or dies.
+			task.spawn(function()
+				if typeof(value) == "Color3" and opt.SetValueRGB then
+					opt:SetValueRGB(value)
+				elseif opt.SetValue then
+					opt:SetValue(value)
+				end
+			end)
 		end
 	end
 	return true
@@ -3001,7 +3038,7 @@ function NovaUI:CreateWindow(config)
 				function Toggle:OnChanged(fn) Toggle.Changed:Connect(fn) end
 				clickArea.MouseButton1Click:Connect(function() Toggle:SetValue(not Toggle.Value) end)
 
-				if id then NovaUI.Options[id] = Toggle end
+				RegisterOption(id, Toggle)
 				return Toggle
 			end
 
@@ -3106,7 +3143,7 @@ function NovaUI:CreateWindow(config)
 					end
 				end))
 
-				if id then NovaUI.Options[id] = Slider end
+				RegisterOption(id, Slider)
 				return Slider
 			end
 
@@ -3436,7 +3473,7 @@ function NovaUI:CreateWindow(config)
 					RefreshButton()
 				end
 
-				if id then NovaUI.Options[id] = Dropdown end
+				RegisterOption(id, Dropdown)
 				return Dropdown
 			end
 
@@ -3694,7 +3731,7 @@ function NovaUI:CreateWindow(config)
 					})
 				end)
 
-				if id then NovaUI.Options[id] = Colorpicker end
+				RegisterOption(id, Colorpicker)
 				return Colorpicker
 			end
 
@@ -3857,7 +3894,7 @@ function NovaUI:CreateWindow(config)
 					end
 				end))
 
-				if id then NovaUI.Options[id] = Keybind end
+				RegisterOption(id, Keybind)
 				return Keybind
 			end
 
@@ -3944,7 +3981,7 @@ function NovaUI:CreateWindow(config)
 					textbox:GetPropertyChangedSignal("Text"):Connect(Fire)
 				end
 
-				if id then NovaUI.Options[id] = Input end
+				RegisterOption(id, Input)
 				return Input
 			end
 
