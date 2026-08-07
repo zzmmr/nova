@@ -1345,6 +1345,35 @@ function NovaUI:CreateWindow(config)
 	})
 	Pad(ContentTopBar, 20, 14, 20, 14)
 
+	-- Minimized mode shrinks the BAR, not what's on it: the top bar's own
+	-- height and its vertical padding come down together so the collapsed
+	-- window can be shorter, while every label/icon inside keeps the size it
+	-- has when expanded (the row just centers them in whatever height it's
+	-- given). The logo is the tallest thing in there at 32px, so the collapsed
+	-- padding is what's left of minimizedHeight around it.
+	-- 470 is the collapsed content measured out with a little slack: 40 bar
+	-- padding + ~300 info row (32 logo + 120 capped title + two stat pills +
+	-- gaps) + 10 + 90 chrome. TopBarSpacer eats whatever is left over.
+	local minimizedWidth = 470
+	local minimizedHeight = 48
+	local topBarPadding = ContentTopBar:FindFirstChildOfClass("UIPadding")
+	local function SetTopBarCollapsed(collapsed, animate)
+		local height = collapsed and minimizedHeight or topBarHeight
+		local padY = collapsed and 8 or 14
+		if animate then
+			Tween(ContentTopBar, { Size = UDim2.new(1, 0, 0, height) }, 0.18, EASE_SOFT)
+			if topBarPadding then
+				Tween(topBarPadding, { PaddingTop = UDim.new(0, padY), PaddingBottom = UDim.new(0, padY) }, 0.18, EASE_SOFT)
+			end
+		else
+			ContentTopBar.Size = UDim2.new(1, 0, 0, height)
+			if topBarPadding then
+				topBarPadding.PaddingTop = UDim.new(0, padY)
+				topBarPadding.PaddingBottom = UDim.new(0, padY)
+			end
+		end
+	end
+
 	-- Only the sidebar logo is a drag handle. Deliberately NOT any part of
 	-- the content top bar — Roblox's InputBegan/InputChanged fire on every
 	-- GuiObject under the cursor regardless of Z-order, so an invisible
@@ -1668,7 +1697,7 @@ function NovaUI:CreateWindow(config)
 		end
 	end
 
-	New("TextLabel", {
+	local MinimizedTitle = New("TextLabel", {
 		Text = config.Title or "Window",
 		Font = Enum.Font.GothamBold,
 		TextSize = 17,
@@ -1681,6 +1710,12 @@ function NovaUI:CreateWindow(config)
 		LayoutOrder = 2,
 		Parent = MinimizedInfoRow,
 	})
+	-- Caps how far AutomaticSize.X can grow this label, which is what makes a
+	-- fixed minimizedWidth safe: without it a long window title widens the
+	-- info row without limit (TextTruncate never kicks in while the label is
+	-- free to grow), eating the spacer and shoving the chrome buttons off the
+	-- right edge of the collapsed bar. With the cap it truncates instead.
+	New("UISizeConstraint", { MaxSize = Vector2.new(120, math.huge), Parent = MinimizedTitle })
 
 	-- One "icon + value" stat pill (FPS/ping). Returns the value label so
 	-- the tracker below can update its Text.
@@ -1892,7 +1927,11 @@ function NovaUI:CreateWindow(config)
 			else
 				self._preMinimizeSize = Main.Size
 			end
-			ResizeKeepingTopLeft(UDim2.new(0, self._fullSize.X.Offset, 0, topBarHeight), 0.18, EASE_SOFT)
+			-- Never wider than the window itself was — on a narrow window the
+			-- nominal collapsed width would otherwise make minimizing it
+			-- bigger.
+			ResizeKeepingTopLeft(UDim2.new(0, math.min(self._fullSize.X.Offset, minimizedWidth), 0, minimizedHeight), 0.18, EASE_SOFT)
+			SetTopBarCollapsed(true, true)
 			Sidebar.Visible = false
 			PagesContainer.Visible = false
 			ResizeHandle.Visible = false
@@ -1904,6 +1943,7 @@ function NovaUI:CreateWindow(config)
 			MinimizedInfoRow.Visible = true
 			StartStatsTracking()
 		else
+			SetTopBarCollapsed(false, true)
 			Sidebar.Visible = true
 			PagesContainer.Visible = true
 			ResizeHandle.Visible = true
@@ -1969,6 +2009,9 @@ function NovaUI:CreateWindow(config)
 			-- fullscreen is exited too.
 			if self._minimized then
 				self._minimized = false
+				-- Instant, like everything else on this path — it's all about
+				-- to be overwritten by the fullscreen tween anyway.
+				SetTopBarCollapsed(false, false)
 				Sidebar.Visible = true
 				PagesContainer.Visible = true
 				ContentArea.Position = UDim2.new(0, railWidth, 0, 0)
