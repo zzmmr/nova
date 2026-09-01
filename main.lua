@@ -64,6 +64,11 @@ local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
+-- Touch device with no keyboard — a phone/tablet rather than a desktop with
+-- a touchscreen (those report both). Popups check this to size themselves up
+-- for fingers instead of a mouse cursor.
+local IsMobile =  UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
 --=============================================================================
 -- THEME
 --=============================================================================
@@ -939,10 +944,40 @@ function NovaUI:CreateWindow(config)
 	local ScreenGui = New("ScreenGui", {
 		Name = "NovaUI",
 		ResetOnSpawn = false,
+		-- Spans the whole screen, including the strip behind Roblox's own
+		-- top bar — the notification gui above already does the same, and
+		-- without it the window's coordinate space is offset from the
+		-- actual screen by that inset.
+		IgnoreGuiInset = true,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		DisplayOrder = 100,
 		Parent = config.Parent or ScreenParent(),
 	})
+
+	-- A zero-cost, non-interactive frame that simply FILLS ScreenGui, kept
+	-- around only to be measured. AbsolutePosition is reported in Roblox's own
+	-- screen space, which stops lining up with the space a ScreenGui's children
+	-- are positioned in the moment IgnoreGuiInset is on: the gui's top-left and
+	-- that space's origin are a top-bar inset apart, so feeding a raw
+	-- AbsolutePosition straight back into a Position (tooltips, popups, the
+	-- window's own resize math) lands everything an inset off. Reading the
+	-- origin off a frame that fills the gui, rather than hardcoding
+	-- GuiService:GetGuiInset(), keeps that conversion correct whichever way
+	-- IgnoreGuiInset is set and on devices that reserve no inset at all.
+	local GuiOrigin = New("Frame", {
+		Name = "GuiOrigin",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Active = false,
+		ZIndex = 0,
+		Parent = ScreenGui,
+	})
+
+	--- Converts an AbsolutePosition into the offset a child of ScreenGui (or of
+	--- anything else that fills it, like Overlay) needs to sit at that spot.
+	local function ToGuiSpace(absolutePosition)
+		return absolutePosition - GuiOrigin.AbsolutePosition
+	end
 
 	-- Tooltip helper (needs ScreenGui + theme, so it's scoped per-window).
 	local function AttachTooltip(button, text)
@@ -962,7 +997,8 @@ function NovaUI:CreateWindow(config)
 		Round(tooltip, 5)
 		Pad(tooltip, 8, 0, 8, 0)
 		button.MouseEnter:Connect(function()
-			tooltip.Position = UDim2.fromOffset(button.AbsolutePosition.X + button.AbsoluteSize.X + 8, button.AbsolutePosition.Y + button.AbsoluteSize.Y / 2 - 12)
+			local anchor = ToGuiSpace(button.AbsolutePosition)
+			tooltip.Position = UDim2.fromOffset(anchor.X + button.AbsoluteSize.X + 8, anchor.Y + button.AbsoluteSize.Y / 2 - 12)
 			tooltip.Visible = true
 			tooltip.BackgroundTransparency = 1
 			Tween(tooltip, { BackgroundTransparency = 0 }, 0.08)
@@ -1161,6 +1197,9 @@ function NovaUI:CreateWindow(config)
 	})
 	local PopupCatcher = New("TextButton", {
 		Text = "",
+		-- Transparent by default; OpenPopup dims it into a scrim behind
+		-- centered (touch-sized) popups only.
+		BackgroundColor3 = Color3.new(0, 0, 0),
 		BackgroundTransparency = 1,
 		AutoButtonColor = false,
 		Size = UDim2.new(1, 0, 1, 0),
@@ -1193,6 +1232,9 @@ function NovaUI:CreateWindow(config)
 	--- hard-clamping to the screen edge and stranding the popup far from
 	--- the button that opened it.
 	--- opts.Gap = pixel gap below the anchor (default 6).
+	--- opts.Center ignores the anchor entirely and centers the popup on
+	--- screen, behind a dim scrim — for touch-sized panels, which are too
+	--- big to hang off their button without running past a screen edge.
 	--- opts.OnClose = fn() called once, when this popup is closed (either
 	--- by clicking an option, or by clicking outside it).
 	local function OpenPopup(popup, anchorButton, opts)
@@ -1205,32 +1247,41 @@ function NovaUI:CreateWindow(config)
 		popup.Parent = Overlay
 		popup.ZIndex = 901
 
-		local anchorPos = anchorButton.AbsolutePosition
-		local anchorSize = anchorButton.AbsoluteSize
 		local popupWidth = popup.Size.X.Offset
 		local screenSize = Overlay.AbsoluteSize
 
-		local leftAlignedX = anchorPos.X
-		local rightAlignedX = anchorPos.X + anchorSize.X - popupWidth
-		local leftFits = (leftAlignedX + popupWidth) <= screenSize.X
-		local rightFits = rightAlignedX >= 0
-		local preferRight = opts.Align == "right"
-
-		local x
-		if preferRight and rightFits then
-			x = rightAlignedX
-		elseif (not preferRight) and leftFits then
-			x = leftAlignedX
-		elseif rightFits then
-			x = rightAlignedX
-		elseif leftFits then
-			x = leftAlignedX
+		if opts.Center then
+			local popupHeight = popup.Size.Y.Offset
+			popup.Position = UDim2.fromOffset(
+				math.max(4, math.floor((screenSize.X - popupWidth) / 2)),
+				math.max(4, math.floor((screenSize.Y - popupHeight) / 2))
+			)
 		else
-			x = preferRight and rightAlignedX or leftAlignedX
-		end
-		x = math.clamp(x, 4, math.max(4, screenSize.X - popupWidth - 4))
+			local anchorPos = ToGuiSpace(anchorButton.AbsolutePosition)
+			local anchorSize = anchorButton.AbsoluteSize
 
-		popup.Position = UDim2.fromOffset(x, anchorPos.Y + anchorSize.Y + (opts.Gap or 6))
+			local leftAlignedX = anchorPos.X
+			local rightAlignedX = anchorPos.X + anchorSize.X - popupWidth
+			local leftFits = (leftAlignedX + popupWidth) <= screenSize.X
+			local rightFits = rightAlignedX >= 0
+			local preferRight = opts.Align == "right"
+
+			local x
+			if preferRight and rightFits then
+				x = rightAlignedX
+			elseif (not preferRight) and leftFits then
+				x = leftAlignedX
+			elseif rightFits then
+				x = rightAlignedX
+			elseif leftFits then
+				x = leftAlignedX
+			else
+				x = preferRight and rightAlignedX or leftAlignedX
+			end
+			x = math.clamp(x, 4, math.max(4, screenSize.X - popupWidth - 4))
+
+			popup.Position = UDim2.fromOffset(x, anchorPos.Y + anchorSize.Y + (opts.Gap or 6))
+		end
 		popup.Visible = true
 		if opts.GrowHeight then
 			PopInHeight(popup)
@@ -1238,6 +1289,14 @@ function NovaUI:CreateWindow(config)
 			PopIn(popup)
 		end
 		PopupCatcher.Visible = true
+		-- A centered popup floats with nothing tying it to what opened it, so it
+		-- gets a scrim behind it to read as a modal panel. Anchored popups leave
+		-- the catcher fully transparent — they already read as attached to their
+		-- button, and dimming the whole window behind a 6-row list is overkill.
+		PopupCatcher.BackgroundTransparency = 1
+		if opts.Center then
+			Tween(PopupCatcher, { BackgroundTransparency = 0.5 }, 0.12)
+		end
 
 		currentPopup = popup
 		currentPopupOnClose = opts.OnClose
@@ -1885,7 +1944,7 @@ function NovaUI:CreateWindow(config)
 	-- itself off-screen like that.
 	local function ResizeKeepingTopLeft(newSize, duration, style)
 		local screenSize = ScreenGui.AbsoluteSize
-		local topLeft = Main.AbsolutePosition
+		local topLeft = ToGuiSpace(Main.AbsolutePosition)
 		local newWidth = newSize.X.Scale * screenSize.X + newSize.X.Offset
 		local newHeight = newSize.Y.Scale * screenSize.Y + newSize.Y.Offset
 		local newCenterX = topLeft.X + newWidth / 2
@@ -1896,6 +1955,48 @@ function NovaUI:CreateWindow(config)
 		else
 			Main.Size = newSize
 			Main.Position = newPosition
+		end
+	end
+
+	-- Gap between the top of the screen and the parked minimized bar.
+	local minimizedTopMargin = 8
+	-- Minimizing docks the collapsed bar to the top-center of the screen
+	-- instead of leaving it wherever the full window happened to sit: a 470x48
+	-- strip abandoned mid-screen reads as debris, and the top edge is where a
+	-- collapsed toolbar is looked for. Returns the position it settled on, so
+	-- restoring can tell "never touched" from "deliberately dragged elsewhere".
+	local function ResizeToTopCenter(newSize, duration, style)
+		local screenSize = ScreenGui.AbsoluteSize
+		local newHeight = newSize.Y.Scale * screenSize.Y + newSize.Y.Offset
+		local newPosition = UDim2.new(0.5, 0, 0.5, minimizedTopMargin + newHeight / 2 - screenSize.Y * 0.5)
+		if duration then
+			Tween(Main, { Size = newSize, Position = newPosition }, duration, style)
+		else
+			Main.Size = newSize
+			Main.Position = newPosition
+		end
+		return newPosition
+	end
+
+	-- Puts Main back to the size AND position it had before it was minimized,
+	-- now that minimizing moves it. The saved position is only trustworthy
+	-- while the collapsed bar is still parked where minimize put it — if it's
+	-- been dragged since, that's a deliberate "leave it here", so grow from
+	-- where it sits now instead (top-left-anchored, so a bar left near the top
+	-- edge can't strand the restored window off-screen).
+	local function RestoreFromMinimized(duration, style)
+		local restoreSize = Window._preMinimizeSize or Window._fullSize
+		local parked = Window._minimizedPosition ~= nil and Main.Position == Window._minimizedPosition
+		Window._minimizedPosition = nil
+		if parked and Window._preMinimizePosition then
+			if duration then
+				Tween(Main, { Size = restoreSize, Position = Window._preMinimizePosition }, duration, style)
+			else
+				Main.Size = restoreSize
+				Main.Position = Window._preMinimizePosition
+			end
+		else
+			ResizeKeepingTopLeft(restoreSize, duration, style)
 		end
 	end
 
@@ -1924,13 +2025,20 @@ function NovaUI:CreateWindow(config)
 				end
 				FullscreenBtn.SetIcon("maximize-2", "\226\150\162")
 				self._preMinimizeSize = self._savedSize or self._fullSize
+				-- Restoring should land where the window actually lived, not
+				-- where fullscreen had parked it.
+				self._preMinimizePosition = self._savedPosition or Main.Position
 			else
 				self._preMinimizeSize = Main.Size
+				self._preMinimizePosition = Main.Position
 			end
 			-- Never wider than the window itself was — on a narrow window the
 			-- nominal collapsed width would otherwise make minimizing it
 			-- bigger.
-			ResizeKeepingTopLeft(UDim2.new(0, math.min(self._fullSize.X.Offset, minimizedWidth), 0, minimizedHeight), 0.18, EASE_SOFT)
+			-- Docked to the top-center of the screen rather than left where
+			-- the full window was; _minimizedPosition is what restoring
+			-- checks against to tell an untouched bar from a dragged one.
+			self._minimizedPosition = ResizeToTopCenter(UDim2.new(0, math.min(self._fullSize.X.Offset, minimizedWidth), 0, minimizedHeight), 0.18, EASE_SOFT)
 			SetTopBarCollapsed(true, true)
 			Sidebar.Visible = false
 			PagesContainer.Visible = false
@@ -1948,7 +2056,7 @@ function NovaUI:CreateWindow(config)
 			PagesContainer.Visible = true
 			ResizeHandle.Visible = true
 			Tween(ContentArea, { Position = UDim2.new(0, railWidth, 0, 0), Size = UDim2.new(1, -railWidth, 1, 0) }, 0.18, EASE_SOFT)
-			ResizeKeepingTopLeft(self._preMinimizeSize or self._fullSize, 0.18, EASE_SOFT)
+			RestoreFromMinimized(0.18, EASE_SOFT)
 			SearchPill.Visible = true
 			SelectorPill.Visible = true
 			CreateConfigBtn.Visible = true
@@ -2022,16 +2130,16 @@ function NovaUI:CreateWindow(config)
 				SaveConfigBtn.Visible = true
 				MinimizedInfoRow.Visible = false
 				StopStatsTracking()
-				-- Main.Position right now is wherever the MINIMIZED bar was
-				-- left (safe for a short bar, e.g. dragged near the top of
-				-- the screen) — pairing that raw position with the tall
+				-- Main.Position right now is wherever the MINIMIZED bar is
+				-- docked (safe for a short bar sitting at the top of the
+				-- screen) — pairing that raw position with the tall
 				-- pre-minimize size below is exactly what pushed the
-				-- restored window's top half off-screen. Resize back to the
-				-- pre-minimize size now (instantly, invisibly — it's about
-				-- to be overwritten by the fullscreen tween anyway) using
-				-- the same top-left-preserving math minimize/restore uses,
-				-- so the position we save is actually safe for that size.
-				ResizeKeepingTopLeft(self._preMinimizeSize or self._fullSize)
+				-- restored window's top half off-screen. Go through the same
+				-- restore path minimize uses instead (instantly, invisibly —
+				-- it's about to be overwritten by the fullscreen tween
+				-- anyway), so the position we save is actually safe for that
+				-- size.
+				RestoreFromMinimized()
 			end
 			self._savedSize = self._preMinimizeSize or Main.Size
 			self._savedPosition = Main.Position
@@ -2105,7 +2213,7 @@ function NovaUI:CreateWindow(config)
 				startSize = Main.Size
 				-- Captured once, at drag start, and never moved for the rest
 				-- of the drag — see the comment below for why.
-				resizeTopLeft = Main.AbsolutePosition
+				resizeTopLeft = ToGuiSpace(Main.AbsolutePosition)
 			end
 		end))
 		Track(UserInputService.InputChanged:Connect(function(input)
@@ -3199,30 +3307,43 @@ function NovaUI:CreateWindow(config)
 			--- own line under the title/description and spans the full width of
 			--- the section, since a selection (especially a multi-select one)
 			--- doesn't read in the ~130px an inline control gets.
+			--- Clicking it opens a small search panel rather than a plain list:
+			--- a filter box narrows the options down as you type (the panel
+			--- shrinks to fit whatever survives), and a bulk-action row sits
+			--- under it — "Select All" (multi-select only, and it takes what the
+			--- current search is showing rather than every option) plus "None",
+			--- which clears the selection outright.
+			--- On a touch device (phone/tablet) that panel centers itself on
+			--- screen behind a dim scrim and scales everything up to finger
+			--- size, rather than hanging off the button at mouse proportions.
 			function Section:AddDropdown(id, cfg)
 				cfg = cfg or {}
 				local values = cfg.Values or {}
 				local multi = cfg.Multi or false
 				-- Only a floor for the popup's width before the button has been
 				-- measured — the button itself is full-width on its own line
-				-- under the title, not a fixed-width box beside it.
-				local minPopupWidth = 160
+				-- under the title, not a fixed-width box beside it. Wider than the
+				-- plain list used to need, so the search field and the All/None row
+				-- still read at the floor, and wider again on touch.
+				local minPopupWidth = IsMobile and 240 or 180
 
-				-- Options are keyed/displayed by tostring(name), so entries
-				-- that stringify the same (duplicate names, or duplicate
-				-- instances with the same .Name) collapse into a single
-				-- option rather than listing repeats.
-				local function CountUniqueNames(list)
-					local seen, count = {}, 0
-					for _, name in ipairs(list) do
-						local key = tostring(name)
-						if not seen[key] then
-							seen[key] = true
-							count = count + 1
-						end
-					end
-					return count
-				end
+				-- Popup geometry. The option list is capped at a row count and
+				-- scrolls past that; the search field and the All/None row above it
+				-- are a fixed-height header, so the popup's total height is that
+				-- header plus however many rows the current search leaves showing.
+				-- Everything scales up on touch, where a 26px row is well under a
+				-- comfortable tap target and 12px labels are a squint.
+				local OPTION_HEIGHT = IsMobile and 40 or 26
+				local OPTION_GAP = IsMobile and 4 or 2
+				local MAX_VISIBLE_OPTIONS = IsMobile and 8 or 6
+				local POPUP_PADDING = IsMobile and 8 or 4
+				local SEARCH_HEIGHT = IsMobile and 38 or 26
+				local ACTION_HEIGHT = IsMobile and 34 or 22
+				local SECTION_GAP = IsMobile and 6 or 4
+				local SEARCH_ICON_SIZE = IsMobile and 16 or 12
+				local POPUP_TEXT_SIZE = IsMobile and 15 or 12
+				local ACTION_TEXT_SIZE = IsMobile and 13 or 11
+				local headerHeight = POPUP_PADDING * 2 + SEARCH_HEIGHT + ACTION_HEIGHT + SECTION_GAP * 2
 
 				local _, controlHolder = CreateRow(cfg, nil, true)
 
@@ -3286,33 +3407,157 @@ function NovaUI:CreateWindow(config)
 				-- be a real offset (OpenPopup places it off Size.X.Offset), so
 				-- it's re-measured from the button on every open rather than
 				-- scaled; until the button has been laid out once, the floor
-				-- below stands in.
-				local function ListHeight()
-					return math.min(CountUniqueNames(values), 6) * 28 + 8
-				end
+				-- below stands in. It isn't a bare list any more: a search field
+				-- and an All/None row stack above the options, so the popup is
+				-- laid out vertically instead of the scroller filling all of it.
 				local listFrame = New("Frame", {
 					BackgroundColor3 = theme.PopupBackground,
 					BackgroundTransparency = 0,
 					Visible = false,
 					ClipsDescendants = true,
-					Size = UDim2.new(0, minPopupWidth, 0, ListHeight()),
+					Size = UDim2.new(0, minPopupWidth, 0, headerHeight + OPTION_HEIGHT),
 					Parent = Overlay,
 				})
 				Round(listFrame, 6)
 				Stroke(listFrame, theme.Border, 1)
 				AddShadow(listFrame, { Transparency = 0.45, OffsetY = 6, Blur = 16 })
+				Pad(listFrame, POPUP_PADDING)
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					Padding = UDim.new(0, SECTION_GAP),
+					Parent = listFrame,
+				})
 
+				-- Search field. Same shape as AddInput's box (accent focus ring
+				-- included) so typing in a popup feels like typing anywhere else.
+				local searchPill = New("Frame", {
+					BackgroundColor3 = theme.ElementBackground,
+					Size = UDim2.new(1, 0, 0, SEARCH_HEIGHT),
+					LayoutOrder = 1,
+					Parent = listFrame,
+				})
+				Round(searchPill, 4)
+				Pad(searchPill, 6, 0, 6, 0)
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					FillDirection = Enum.FillDirection.Horizontal,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 5),
+					Parent = searchPill,
+				})
+				local searchRing = Stroke(searchPill, theme.Accent, 1.5, 1)
+				do
+					local icon = GetIcon("search", SEARCH_ICON_SIZE)
+					if icon then
+						icon.LayoutOrder = 1
+						icon.ImageColor3 = theme.SubText
+						icon.Parent = searchPill
+					else
+						New("TextLabel", {
+							Text = "\226\140\149",
+							Font = Enum.Font.GothamBold,
+							TextSize = POPUP_TEXT_SIZE - 1,
+							TextColor3 = theme.SubText,
+							BackgroundTransparency = 1,
+							Size = UDim2.new(0, SEARCH_ICON_SIZE, 1, 0),
+							LayoutOrder = 1,
+							Parent = searchPill,
+						})
+					end
+				end
+				local searchInput = New("TextBox", {
+					Text = "",
+					PlaceholderText = "Search...",
+					Font = Enum.Font.Gotham,
+					TextSize = POPUP_TEXT_SIZE,
+					TextColor3 = theme.Text,
+					PlaceholderColor3 = theme.SubText,
+					ClearTextOnFocus = false,
+					BackgroundTransparency = 1,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextTruncate = Enum.TextTruncate.AtEnd,
+					Size = UDim2.new(1, -(SEARCH_ICON_SIZE + 5), 1, 0),
+					LayoutOrder = 2,
+					Parent = searchPill,
+				})
+				searchInput.Focused:Connect(function()
+					Tween(searchRing, { Transparency = 0 }, 0.12)
+				end)
+				searchInput.FocusLost:Connect(function()
+					Tween(searchRing, { Transparency = 1 }, 0.15)
+				end)
+
+				-- Bulk-selection row. "Select All" only means anything for a
+				-- multi-select, so a single-select gets a full-width "None" rather
+				-- than half a row with a dead half beside it.
+				local actionRow = New("Frame", {
+					BackgroundTransparency = 1,
+					Size = UDim2.new(1, 0, 0, ACTION_HEIGHT),
+					LayoutOrder = 2,
+					Parent = listFrame,
+				})
+				New("UIListLayout", {
+					SortOrder = Enum.SortOrder.LayoutOrder,
+					FillDirection = Enum.FillDirection.Horizontal,
+					VerticalAlignment = Enum.VerticalAlignment.Center,
+					Padding = UDim.new(0, 4),
+					Parent = actionRow,
+				})
+				local function ActionButton(text, layoutOrder, size)
+					local btn = New("TextButton", {
+						Text = text,
+						Font = Enum.Font.GothamMedium,
+						TextSize = ACTION_TEXT_SIZE,
+						TextColor3 = theme.SubText,
+						BackgroundColor3 = theme.ElementBackground,
+						BackgroundTransparency = 0,
+						AutoButtonColor = false,
+						Size = size,
+						LayoutOrder = layoutOrder,
+						Parent = actionRow,
+					})
+					Round(btn, 4)
+					btn.MouseEnter:Connect(function()
+						Tween(btn, { BackgroundColor3 = theme.ElementBackgroundHover, TextColor3 = theme.Text }, 0.1)
+					end)
+					btn.MouseLeave:Connect(function()
+						Tween(btn, { BackgroundColor3 = theme.ElementBackground, TextColor3 = theme.SubText }, 0.1)
+					end)
+					return btn
+				end
+				local selectAllBtn = multi and ActionButton("Select All", 1, UDim2.new(0.5, -2, 1, 0)) or nil
+				local noneBtn = ActionButton("None", 2, multi and UDim2.new(0.5, -2, 1, 0) or UDim2.new(1, 0, 1, 0))
+
+				-- Height is driven by ResizePopup (below) off how many options the
+				-- search leaves showing, so it can't just fill listFrame the way it
+				-- did when the popup was nothing but this scroller.
 				local listScroll = New("ScrollingFrame", {
 					BackgroundTransparency = 1,
-					Size = UDim2.new(1, 0, 1, 0),
+					Size = UDim2.new(1, 0, 0, OPTION_HEIGHT),
 					CanvasSize = UDim2.new(0, 0, 0, 0),
 					AutomaticCanvasSize = Enum.AutomaticSize.Y,
 					ScrollBarThickness = 2,
 					BorderSizePixel = 0,
+					LayoutOrder = 3,
 					Parent = listFrame,
 				})
-				Pad(listScroll, 4)
-				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = listScroll })
+				New("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, OPTION_GAP), Parent = listScroll })
+				-- Stand-in row so a search that matches nothing (or a dropdown with
+				-- no options yet) doesn't collapse the list to an empty sliver. Its
+				-- LayoutOrder is past any real option's, so it always sorts last.
+				local emptyLabel = New("TextLabel", {
+					Text = "No options",
+					Font = Enum.Font.Gotham,
+					TextSize = POPUP_TEXT_SIZE,
+					TextColor3 = theme.SubText,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					BackgroundTransparency = 1,
+					Visible = false,
+					Size = UDim2.new(1, 0, 0, OPTION_HEIGHT),
+					LayoutOrder = 1000000,
+					Parent = listScroll,
+				})
+				Pad(emptyLabel, 8, 0, 8, 0)
 
 				local Dropdown = { Value = multi and {} or nil, Changed = Signal.new(), _optionButtons = {} }
 				-- Tracks the in-flight hover Tween per option (keyed by name) so a
@@ -3328,6 +3573,8 @@ function NovaUI:CreateWindow(config)
 				-- object behind it is what Dropdown.Value holds, so a dropdown
 				-- built from parts hands parts back to the callback.
 				local optionByKey = {}
+				-- The popup's current search, lowercased. "" means "show everything".
+				local searchQuery = ""
 				-- Accepts either an entry itself or the name of one (from a
 				-- saved config, or just for convenience) and returns the live
 				-- entry. Values that don't name an option pass through
@@ -3369,6 +3616,56 @@ function NovaUI:CreateWindow(config)
 						btn.TextColor3 = active and theme.Accent or theme.Text
 					end
 				end
+				-- Plain case-insensitive substring match on the option's label —
+				-- string.find with plain=true, so a query containing Lua pattern
+				-- characters ("(", "%", "-") searches for them literally instead of
+				-- erroring or quietly matching something else.
+				local function Matches(key)
+					if searchQuery == "" then return true end
+					return string.find(key:lower(), searchQuery, 1, true) ~= nil
+				end
+				local function VisibleOptionCount()
+					local shown = 0
+					for key in pairs(Dropdown._optionButtons) do
+						if Matches(key) then shown = shown + 1 end
+					end
+					return shown
+				end
+				-- The header is fixed; only the list part moves, so the popup
+				-- shrinks as a search narrows the options down and grows back (to
+				-- the row cap) when it's cleared.
+				local function ResizePopup(width, shown)
+					shown = shown or VisibleOptionCount()
+					local rows = math.clamp(shown, 1, MAX_VISIBLE_OPTIONS)
+					if IsMobile then
+						-- Touch rows are half again as tall, so the flat cap above
+						-- can still overrun a short phone screen — lower it to
+						-- whatever actually fits in 70% of the viewport.
+						local screenHeight = Overlay.AbsoluteSize.Y
+						if screenHeight > 0 then
+							local roomForRows = math.floor((screenHeight * 0.7 - headerHeight + OPTION_GAP) / (OPTION_HEIGHT + OPTION_GAP))
+							rows = math.clamp(rows, 1, math.max(1, roomForRows))
+						end
+					end
+					local listHeight = rows * OPTION_HEIGHT + (rows - 1) * OPTION_GAP
+					listScroll.Size = UDim2.new(1, 0, 0, listHeight)
+					listFrame.Size = UDim2.new(0, width or listFrame.Size.X.Offset, 0, headerHeight + listHeight)
+				end
+				local function ApplyFilter()
+					local shown = 0
+					for key, btn in pairs(Dropdown._optionButtons) do
+						local visible = Matches(key)
+						btn.Visible = visible
+						if visible then shown = shown + 1 end
+					end
+					emptyLabel.Text = searchQuery ~= "" and "No matches" or "No options"
+					emptyLabel.Visible = shown == 0
+					ResizePopup(nil, shown)
+				end
+				searchInput:GetPropertyChangedSignal("Text"):Connect(function()
+					searchQuery = searchInput.Text:lower()
+					ApplyFilter()
+				end)
 				function Dropdown:OnChanged(fn) Dropdown.Changed:Connect(fn) end
 				--- Dropdown:SetValue(value) — value may be an entry from Values
 				--- or its name; either way Dropdown.Value ends up holding the
@@ -3401,23 +3698,26 @@ function NovaUI:CreateWindow(config)
 				-- Pulled out so SetOptions can rebuild the list on demand
 				-- instead of only ever building it once at creation time.
 				local function CreateOptionButton(name, i)
+					local optKey = tostring(name)
 					local optBtn = New("TextButton", {
-						Text = tostring(name),
+						Text = optKey,
 						Font = Enum.Font.Gotham,
-						TextSize = 12,
+						TextSize = POPUP_TEXT_SIZE,
 						TextColor3 = theme.Text,
 						TextXAlignment = Enum.TextXAlignment.Left,
 						TextTruncate = Enum.TextTruncate.AtEnd,
 						BackgroundColor3 = theme.Accent,
 						BackgroundTransparency = 1,
 						AutoButtonColor = false,
-						Size = UDim2.new(1, 0, 0, 26),
+						-- An option added while a search is running stays hidden
+						-- until it matches, same as any other non-match.
+						Visible = Matches(optKey),
+						Size = UDim2.new(1, 0, 0, OPTION_HEIGHT),
 						LayoutOrder = i,
 						Parent = listScroll,
 					})
 					Round(optBtn, 4)
 					Pad(optBtn, 8, 0, 8, 0)
-					local optKey = tostring(name)
 					Dropdown._optionButtons[optKey] = optBtn
 					optionByKey[optKey] = name
 					optBtn.MouseEnter:Connect(function()
@@ -3471,7 +3771,6 @@ function NovaUI:CreateWindow(config)
 							CreateOptionButton(name, i)
 						end
 					end
-					listFrame.Size = UDim2.new(0, listFrame.Size.X.Offset, 0, ListHeight())
 					-- Selections carry over by name, so a rebuilt list re-points
 					-- Value at the *new* list's entry rather than keeping a
 					-- reference to the old (possibly destroyed) object.
@@ -3487,20 +3786,70 @@ function NovaUI:CreateWindow(config)
 					end
 					RefreshButton()
 					RefreshHighlights()
+					ApplyFilter()
 				end
+
+				if selectAllBtn then
+					-- Selects everything the current search is showing and leaves
+					-- filtered-out selections alone: "Select All" means all of what
+					-- you can see, not a silent reset of what you'd already picked
+					-- before typing.
+					selectAllBtn.MouseButton1Click:Connect(function()
+						local newMap = {}
+						for option, on in pairs(Dropdown.Value or {}) do
+							if on then newMap[option] = true end
+						end
+						for key, option in pairs(optionByKey) do
+							if Matches(key) then newMap[option] = true end
+						end
+						Dropdown:SetValue(newMap)
+					end)
+				end
+				-- Clears every selection, search or no search — it's the "get me
+				-- back to nothing" escape hatch, so it deliberately ignores the
+				-- filter. Single-select closes after it, same as picking an option.
+				noneBtn.MouseButton1Click:Connect(function()
+					if multi then
+						Dropdown:SetValue({})
+					else
+						Dropdown:SetValue(nil)
+						ClosePopup()
+					end
+				end)
 
 				ddBtn.MouseButton1Click:Connect(function()
 					-- Match the popup to the button it drops out of, now that the
 					-- button's width comes from the section rather than a
 					-- constant. Measured here because AbsoluteSize isn't known
 					-- until the row has been laid out, and it changes with the
-					-- window / column count.
-					listFrame.Size = UDim2.new(0, math.max(ddBtn.AbsoluteSize.X, minPopupWidth), 0, ListHeight())
+					-- window / column count. On touch it's measured off the SCREEN
+					-- instead — a finger-sized panel is wider than most rows, and
+					-- it gets centered rather than dropped under the button.
+					local popupWidth
+					if IsMobile then
+						-- A little over half the screen, capped: 80% of a landscape
+						-- phone came out absurdly wide for a list of short labels.
+						local screenWidth = Overlay.AbsoluteSize.X
+						local widest = math.max(minPopupWidth, math.min(320, screenWidth - 32))
+						popupWidth = math.clamp(math.floor(screenWidth * 0.55), minPopupWidth, widest)
+					else
+						popupWidth = math.max(ddBtn.AbsoluteSize.X, minPopupWidth)
+					end
+					ResizePopup(popupWidth)
 					OpenPopup(listFrame, ddBtn, {
 						Align = "left",
-						GrowHeight = true,
+						Center = IsMobile,
+						-- Growing downward reads as "dropping out of the button".
+						-- A centered panel isn't dropping out of anything, so it
+						-- scales in from its own center instead.
+						GrowHeight = not IsMobile,
 						OnClose = function()
 							Tween(chevron, { Rotation = 0 }, 0.12)
+							-- Every open starts from a clean, unfiltered list.
+							-- Clearing the box re-runs ApplyFilter through the
+							-- Text handler above.
+							searchInput:ReleaseFocus()
+							searchInput.Text = ""
 						end,
 					})
 					-- OpenPopup toggles closed (and Visible=false) if this
@@ -3508,6 +3857,12 @@ function NovaUI:CreateWindow(config)
 					-- actually just opened.
 					if listFrame.Visible then
 						Tween(chevron, { Rotation = 180 }, 0.12)
+						-- Type-to-filter straight away on desktop. Skipped on touch,
+						-- where capturing focus throws the on-screen keyboard up
+						-- over the list that was just opened.
+						if not UserInputService.TouchEnabled then
+							searchInput:CaptureFocus()
+						end
 					end
 				end)
 				if cfg.Default ~= nil then
@@ -3515,6 +3870,7 @@ function NovaUI:CreateWindow(config)
 				else
 					RefreshButton()
 				end
+				ApplyFilter()
 
 				RegisterOption(id, Dropdown)
 				return Dropdown
