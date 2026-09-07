@@ -51,6 +51,19 @@
 	Motion is intentionally restrained/modern: short fades + small (4-8px)
 	slides, no overshoot/bounce easing.
 
+	Configs save themselves. The top bar's Create / Save / Set-as-Autoload
+	buttons read and write real files through the executor's filesystem
+	globals — no SaveManager to bolt on — under
+	<Folder>/Games/<game.GameId>/<name>.txt, where Folder defaults to
+	"NovaUI" (CreateWindow's `Folder` / `ConfigFolder` change that).
+	Picking a config from the selector loads it, and Window:StartAutoLoad()
+	— called once, after your UI is fully built — applies whichever config
+	is marked for autoload. Window.Configs exposes the same store
+	programmatically (List/Load/Save/Create/Delete), and the ConfigSelector
+	signals still fire throughout, so an existing OnSave/OnCreate/OnChanged
+	handler keeps working. With no filesystem available (Studio), the store
+	stands down and only the signals fire.
+
 	Theme: dark background with a blue accent (see Themes.Dark below).
 --]]
 
@@ -375,6 +388,49 @@ end
 
 local function ScreenParent()
 	return game:GetService("CoreGui")
+end
+
+--=============================================================================
+-- FILESYSTEM
+--=============================================================================
+
+-- readfile/writefile/isfolder/... aren't Roblox APIs, they're executor
+-- extensions — under Studio (or a stripped-down executor) they're simply
+-- absent, and reading an undefined global just yields nil rather than
+-- erroring. Everything funnels through this table so the built-in config
+-- store can check FS.Ready once and quietly degrade to signals-only, instead
+-- of blowing up the moment a window is created somewhere without file access.
+local FS = {
+	IsFolder = isfolder,
+	MakeFolder = makefolder,
+	ListFiles = listfiles,
+	IsFile = isfile,
+	ReadFile = readfile,
+	WriteFile = writefile,
+	-- Optional: everything but deleting a config works without it.
+	DeleteFile = delfile,
+}
+FS.Ready = type(FS.IsFolder) == "function"
+	and type(FS.MakeFolder) == "function"
+	and type(FS.ListFiles) == "function"
+	and type(FS.IsFile) == "function"
+	and type(FS.ReadFile) == "function"
+	and type(FS.WriteFile) == "function"
+
+-- Creates every level of `path` in turn. makefolder isn't recursive on all
+-- executors, so handing it "a/b/c" in one call can silently do nothing when
+-- "a" doesn't exist yet.
+local function EnsureFolder(path)
+	if not FS.Ready then return false end
+	local built
+	for segment in path:gmatch("[^/]+") do
+		built = built and (built .. "/" .. segment) or segment
+		if not FS.IsFolder(built) then
+			local ok = pcall(FS.MakeFolder, built)
+			if not ok then return false end
+		end
+	end
+	return FS.IsFolder(path) and true or false
 end
 
 --=============================================================================
@@ -917,9 +973,13 @@ function NovaUI:CreateWindow(config)
 
 	-- The search / config-selector pills in the top bar. Both still fill the
 	-- row's height; only their width is set here (the selector's popup is
-	-- pinned to the same number so it stays flush with the pill).
-	local searchPillWidth = 132
-	local selectorPillWidth = 138
+	-- pinned to the same number so it stays flush with the pill). Trimmed
+	-- to pay for the autoload button — the ribbon is three 36px buttons wide
+	-- now, and search gives up more of it than the selector because its
+	-- placeholder is one short word while the selector shows real config
+	-- names that truncate.
+	local searchPillWidth = 104
+	local selectorPillWidth = 122
 
 	-- Every connection this window makes to a GLOBAL, persistent service
 	-- (UserInputService, Workspace) gets tracked here and explicitly
@@ -1452,8 +1512,8 @@ function NovaUI:CreateWindow(config)
 		Parent = TopBarRow,
 	})
 
-	-- Search pill (narrower than before — the save-config button added
-	-- next to the selector needs the room in the top bar).
+	-- Search pill (narrower than before — the save-config and autoload
+	-- buttons next to the selector need the room in the top bar).
 	local SearchPill = New("Frame", {
 		BackgroundColor3 = theme.ElementBackground,
 		Size = UDim2.new(0, searchPillWidth, 1, 0),
@@ -1652,6 +1712,37 @@ function NovaUI:CreateWindow(config)
 	end)
 	AttachTooltip(SaveConfigBtn, "Save Config")
 
+	-- Autoload button, right next to it. Marks the CURRENTLY SELECTED config
+	-- as the one to load on startup (click again to clear it) and fires
+	-- Window.ConfigSelector:OnAutoLoad(fn) — the library has no file access of
+	-- its own, so persisting that choice is the consumer's job, same as saving
+	-- the config itself. Its icon lights up in the accent color whenever the
+	-- selected config IS the autoload one; the list marks it too.
+	local AutoLoadBtn = New("TextButton", {
+		Text = "",
+		BackgroundColor3 = theme.ElementBackground,
+		Size = UDim2.new(0, 36, 1, 0),
+		AutoButtonColor = false,
+		LayoutOrder = 5,
+		ZIndex = 2,
+		Parent = TopBarRow,
+	})
+	Round(AutoLoadBtn, 8)
+	local autoLoadIconHandle = SetButtonIcon(AutoLoadBtn, "zap", "\226\154\161", 14, theme.SubText)
+	AddHoverFade(AutoLoadBtn, 0, 0.4)
+	-- Unlike the two buttons above, the resting color isn't a constant — it's
+	-- whatever the autoload state says it should be, so hover has to fall back
+	-- to that instead of hardcoding SubText. RefreshAutoLoadUI (further down,
+	-- with the ConfigSelector) owns this variable.
+	local autoLoadRestColor = theme.SubText
+	AutoLoadBtn.MouseEnter:Connect(function()
+		autoLoadIconHandle.SetColor(autoLoadRestColor == theme.SubText and theme.Text or theme.AccentHover)
+	end)
+	AutoLoadBtn.MouseLeave:Connect(function()
+		autoLoadIconHandle.SetColor(autoLoadRestColor)
+	end)
+	local autoLoadTooltip = AttachTooltip(AutoLoadBtn, "Set as Autoload")
+
 	-- Flexible spacer — eats whatever room is left in the top bar so
 	-- ChromeRow below always ends up flush against the right edge instead
 	-- of just trailing whatever's to its left. It's also a second drag
@@ -1662,7 +1753,7 @@ function NovaUI:CreateWindow(config)
 	local TopBarSpacer = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, 0, 1, 0),
-		LayoutOrder = 5,
+		LayoutOrder = 6,
 		Parent = TopBarRow,
 	})
 	New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = TopBarSpacer })
@@ -1678,7 +1769,7 @@ function NovaUI:CreateWindow(config)
 	local ChromeRow = New("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0, TRAFFIC_HIT_WIDTH * 3, 1, 0),
-		LayoutOrder = 6,
+		LayoutOrder = 7,
 		ZIndex = 2,
 		Parent = TopBarRow,
 	})
@@ -1705,7 +1796,7 @@ function NovaUI:CreateWindow(config)
 
 	--=========================================================================
 	-- MINIMIZED-MODE INFO ROW — swapped in for the search/config cluster
-	-- (SearchPill/SelectorPill/CreateConfigBtn/SaveConfigBtn) while minimized;
+	-- (SearchPill/SelectorPill/CreateConfigBtn/SaveConfigBtn/AutoLoadBtn) while minimized;
 	-- ChromeRow stays put either way. Shows the logo, the window title, and
 	-- live FPS/ping stats. Same LayoutOrder (1) as SearchPill so it takes
 	-- over that slot in TopBarRow's layout.
@@ -2048,6 +2139,7 @@ function NovaUI:CreateWindow(config)
 			SelectorPill.Visible = false
 			CreateConfigBtn.Visible = false
 			SaveConfigBtn.Visible = false
+			AutoLoadBtn.Visible = false
 			MinimizedInfoRow.Visible = true
 			StartStatsTracking()
 		else
@@ -2061,6 +2153,7 @@ function NovaUI:CreateWindow(config)
 			SelectorPill.Visible = true
 			CreateConfigBtn.Visible = true
 			SaveConfigBtn.Visible = true
+			AutoLoadBtn.Visible = true
 			MinimizedInfoRow.Visible = false
 			StopStatsTracking()
 		end
@@ -2128,6 +2221,7 @@ function NovaUI:CreateWindow(config)
 				SelectorPill.Visible = true
 				CreateConfigBtn.Visible = true
 				SaveConfigBtn.Visible = true
+				AutoLoadBtn.Visible = true
 				MinimizedInfoRow.Visible = false
 				StopStatsTracking()
 				-- Main.Position right now is wherever the MINIMIZED bar is
@@ -2351,27 +2445,99 @@ function NovaUI:CreateWindow(config)
 		ApplySearchFilter()
 	end)
 
-	--- Window:AddConfig(name) — registers a name in the top config selector.
-	--- Window.ConfigSelector:OnChanged(fn) fires with the selected name.
+	--- Signals on the top config selector. All three fire whether the action
+	--- came from a ribbon button or from a Window.Configs:* call, and the
+	--- built-in file store (CONFIG FILE STORE, further down) is itself just
+	--- another listener on them — so hooking these to do your own extra work
+	--- on top (cloud sync, logging, a different folder layout) still works,
+	--- and nothing here has to be wired up for the buttons to function.
+	--- Window.ConfigSelector:OnChanged(fn) fires with the selected name; the
+	--- store's own listener is what reads that config off disk and applies it.
 	--- Window.ConfigSelector:OnSave(fn) fires with (name, jsonString) when the
 	--- save-config button is clicked — jsonString is every registered
 	--- option's current value, JSON-encoded (Colorpicker values included).
-	--- Hook up your own persistence (e.g. writeFile) inside that callback.
 	--- Window.ConfigSelector:OnCreate(fn) fires with (name, jsonString) whenever
 	--- a new config is made via the "Create Config" ribbon button's dialog —
-	--- jsonString is the same current-state export OnSave gets, so you can
-	--- save a fresh file for it right away without calling ExportConfigJSON
-	--- yourself.
-	local ConfigSelector = { Value = SelectorLabel.Text, Changed = Signal.new(), Save = Signal.new(), Created = Signal.new(), _options = {}, _buttons = {} }
+	--- jsonString is the same current-state export OnSave gets.
+	--- Window.ConfigSelector:OnAutoLoad(fn) fires with the name marked to load
+	--- on startup (or nil when it's cleared), from the "Set as Autoload" ribbon
+	--- button or from SetAutoLoad. The store persists that mark itself and
+	--- replays it on the next launch; this signal is only for reacting to it.
+	local ConfigSelector = {
+		Value = SelectorLabel.Text,
+		-- Name of the config marked to load on startup, or nil for none.
+		AutoLoad = nil,
+		Changed = Signal.new(),
+		Save = Signal.new(),
+		Created = Signal.new(),
+		AutoLoadChanged = Signal.new(),
+		_options = {},
+		_buttons = {},
+	}
 	function ConfigSelector:OnChanged(fn) ConfigSelector.Changed:Connect(fn) end
 	function ConfigSelector:OnSave(fn) ConfigSelector.Save:Connect(fn) end
 	--- ConfigSelector:OnCreate(fn) — fires with (name, jsonString) whenever a
 	--- config is made via the "Create Config" ribbon button's dialog.
 	function ConfigSelector:OnCreate(fn) ConfigSelector.Created:Connect(fn) end
+	--- ConfigSelector:OnAutoLoad(fn) — fires with the newly marked name, or nil
+	--- when the mark is cleared. Persist it here.
+	function ConfigSelector:OnAutoLoad(fn) ConfigSelector.AutoLoadChanged:Connect(fn) end
+
+	-- Repaints everything that reflects the autoload choice: the AUTO tag on
+	-- the marked row in the list, and the ribbon button, whose icon color and
+	-- tooltip describe what clicking it would do to the CURRENTLY SELECTED
+	-- config — set it, or clear it when that's already the marked one.
+	local function RefreshAutoLoadUI()
+		for name, btn in pairs(ConfigSelector._buttons) do
+			local marked = ConfigSelector.AutoLoad == name
+			local tag = btn:FindFirstChild("AutoTag")
+			local nameLabel = btn:FindFirstChild("NameLabel")
+			if tag then tag.Visible = marked end
+			-- Give the tag its own room rather than letting a long config name
+			-- run underneath it; unmarked rows keep the full width.
+			if nameLabel then nameLabel.Size = UDim2.new(1, marked and -50 or -16, 1, 0) end
+		end
+		local selectedIsMarked = ConfigSelector.AutoLoad ~= nil and ConfigSelector.AutoLoad == ConfigSelector.Value
+		autoLoadRestColor = selectedIsMarked and theme.Accent or theme.SubText
+		autoLoadIconHandle.SetColor(autoLoadRestColor)
+		autoLoadTooltip.Text = selectedIsMarked and "Clear Autoload" or "Set as Autoload"
+	end
+
 	function ConfigSelector:SetValue(name)
 		ConfigSelector.Value = name
 		SelectorLabel.Text = name
+		-- The ribbon button describes the selected config, so it has to be
+		-- repainted whenever the selection moves, not just when the mark does.
+		RefreshAutoLoadUI()
 		ConfigSelector.Changed:Fire(name)
+	end
+
+	--- ConfigSelector:SetAutoLoad(name, silent) — marks `name` as the config to
+	--- load on startup; nil (or "") clears the mark. Fires OnAutoLoad so the
+	--- choice can be written out, unless `silent` is true — pass that when
+	--- you're restoring an already-saved choice at startup and don't want it
+	--- written straight back.
+	function ConfigSelector:SetAutoLoad(name, silent)
+		if name == "" then name = nil end
+		ConfigSelector.AutoLoad = name
+		RefreshAutoLoadUI()
+		if not silent then
+			ConfigSelector.AutoLoadChanged:Fire(name)
+		end
+	end
+
+	--- ConfigSelector:GetAutoLoad() — the name marked for autoload, or nil.
+	function ConfigSelector:GetAutoLoad() return ConfigSelector.AutoLoad end
+
+	-- Drops the mark when the config it points at is gone (deleted, or absent
+	-- from a rebuilt list) — a mark aimed at a config that no longer exists
+	-- would just fail to load on the next startup, silently.
+	local function PruneAutoLoad()
+		if ConfigSelector.AutoLoad ~= nil and not ConfigSelector._buttons[ConfigSelector.AutoLoad] then
+			ConfigSelector:SetAutoLoad(nil)
+		else
+			RefreshAutoLoadUI()
+		end
 	end
 
 	-- Caps how tall SelectorList grows before it scrolls instead — same
@@ -2382,12 +2548,7 @@ function NovaUI:CreateWindow(config)
 
 	local function CreateOptionButton(name, layoutOrder)
 		local btn = New("TextButton", {
-			Text = name,
-			Font = Enum.Font.Gotham,
-			TextSize = 12,
-			TextColor3 = theme.Text,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
+			Text = "",
 			BackgroundColor3 = theme.Accent,
 			BackgroundTransparency = 1,
 			AutoButtonColor = false,
@@ -2396,7 +2557,37 @@ function NovaUI:CreateWindow(config)
 			Parent = SelectorListScroll,
 		})
 		Round(btn, 4)
-		Pad(btn, 8, 0, 8, 0)
+		-- The name is its own label rather than the button's built-in Text (same
+		-- reason AddDropdown splits them): the AUTO tag needs a fixed spot at the
+		-- row's right edge, and UIPadding would move the tag along with the text
+		-- instead of leaving it put.
+		New("TextLabel", {
+			Name = "NameLabel",
+			Text = name,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextColor3 = theme.Text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			BackgroundTransparency = 1,
+			Position = UDim2.new(0, 8, 0, 0),
+			Size = UDim2.new(1, -16, 1, 0),
+			Parent = btn,
+		})
+		New("TextLabel", {
+			Name = "AutoTag",
+			Text = "AUTO",
+			Font = Enum.Font.GothamBold,
+			TextSize = 9,
+			TextColor3 = theme.Accent,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			BackgroundTransparency = 1,
+			Visible = false,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -8, 0.5, 0),
+			Size = UDim2.new(0, 30, 1, 0),
+			Parent = btn,
+		})
 		btn.MouseEnter:Connect(function() Tween(btn, { BackgroundTransparency = 0.85 }, 0.08) end)
 		btn.MouseLeave:Connect(function() Tween(btn, { BackgroundTransparency = 1 }, 0.08) end)
 		btn.MouseButton1Click:Connect(function()
@@ -2406,6 +2597,9 @@ function NovaUI:CreateWindow(config)
 		return btn
 	end
 
+	--- ConfigSelector:SetOptions(list) — replaces the whole list. An autoload
+	--- mark pointing at a name that isn't in the new list is cleared (and
+	--- OnAutoLoad fires with nil), same as deleting that config.
 	function ConfigSelector:SetOptions(list)
 		for _, btn in pairs(ConfigSelector._buttons) do btn:Destroy() end
 		ConfigSelector._buttons = {}
@@ -2415,6 +2609,7 @@ function NovaUI:CreateWindow(config)
 			ConfigSelector._buttons[name] = CreateOptionButton(name, i)
 		end
 		RefreshSelectorListSize()
+		PruneAutoLoad()
 	end
 
 	--- ConfigSelector:AddOption(name) — appends one entry to the dropdown
@@ -2424,9 +2619,13 @@ function NovaUI:CreateWindow(config)
 		table.insert(ConfigSelector._options, name)
 		ConfigSelector._buttons[name] = CreateOptionButton(name, #ConfigSelector._options)
 		RefreshSelectorListSize()
+		-- A re-added name can re-adopt a mark that was restored before the list
+		-- was populated, so the new row picks up its tag right away.
+		RefreshAutoLoadUI()
 	end
 
 	--- ConfigSelector:RemoveOption(name) — removes one entry from the dropdown.
+	--- Clears the autoload mark if it pointed at that entry.
 	function ConfigSelector:RemoveOption(name)
 		local btn = ConfigSelector._buttons[name]
 		if not btn then return end
@@ -2439,6 +2638,241 @@ function NovaUI:CreateWindow(config)
 			end
 		end
 		RefreshSelectorListSize()
+		PruneAutoLoad()
+	end
+
+	--=====================================================================
+	-- CONFIG FILE STORE
+	--=====================================================================
+	-- The window reads and writes its own config files now, so a consumer
+	-- doesn't have to bolt a SaveManager onto the ConfigSelector signals to
+	-- get working Save/Create/select-to-load buttons. It still goes THROUGH
+	-- those signals rather than around them, so anything already listening
+	-- on OnSave/OnCreate/OnChanged keeps firing exactly as before — the
+	-- store is just one more listener that happens to ship with the library.
+	--
+	-- CreateWindow options:
+	--   Folder            brand root folder (default "NovaUI"); configs land
+	--                     in <Folder>/Games/<GameId> so two games can't
+	--                     collide on a config name.
+	--   ConfigFolder      the whole path, overriding the above outright.
+	--   ConfigExtension   file extension, default ".txt".
+	--   ConfigNotifications  false to silence the saved/loaded/created toasts
+	--                     without turning the store itself off.
+	-- Autoload is never automatic on its own: only the calling script knows
+	-- when it has finished adding options. Call Window:StartAutoLoad() once
+	-- the UI is fully built.
+	local configFolder = config.ConfigFolder
+		or ((config.Folder or "NovaUI") .. "/Games/" .. tostring(game.GameId))
+	local configExtension = config.ConfigExtension or ".txt"
+	-- The autoload marker lives in the same folder as the configs, so it has
+	-- to be skipped when listing them or it'd show up as a selectable config
+	-- named "_autoload".
+	local AUTOLOAD_NAME = "_autoload"
+
+	local function ConfigPath(name)
+		return configFolder .. "/" .. name .. configExtension
+	end
+
+	local function ListConfigNames()
+		local names = {}
+		if not FS.Ready or not FS.IsFolder(configFolder) then return names end
+		local ok, files = pcall(FS.ListFiles, configFolder)
+		if not ok or type(files) ~= "table" then return names end
+		for _, path in ipairs(files) do
+			local fileWithExt = path:match("[^/\\]+$")
+			if fileWithExt then
+				local nameOnly = fileWithExt:match("(.+)%..+$") or fileWithExt
+				if nameOnly ~= AUTOLOAD_NAME then
+					table.insert(names, nameOnly)
+				end
+			end
+		end
+		-- listfiles hands them back in whatever order the filesystem feels like,
+		-- which reshuffles the dropdown between sessions for no reason.
+		table.sort(names)
+		return names
+	end
+
+	local function ReadAutoLoadName()
+		if not FS.Ready then return nil end
+		local path = ConfigPath(AUTOLOAD_NAME)
+		if not FS.IsFile(path) then return nil end
+		local ok, contents = pcall(FS.ReadFile, path)
+		if not ok or type(contents) ~= "string" then return nil end
+		contents = contents:gsub("^%s+", ""):gsub("%s+$", "")
+		return contents ~= "" and contents or nil
+	end
+
+	local function WriteAutoLoadName(name)
+		if not FS.Ready then return false end
+		local path = ConfigPath(AUTOLOAD_NAME)
+		if name == nil or name == "" then
+			if FS.DeleteFile and FS.IsFile(path) then
+				return (pcall(FS.DeleteFile, path))
+			end
+			-- No delfile on this executor: an empty marker reads as "none" too.
+			return (pcall(FS.WriteFile, path, ""))
+		end
+		if not EnsureFolder(configFolder) then return false end
+		return (pcall(FS.WriteFile, path, name))
+	end
+
+	local notifyTitle = config.Title or "NovaUI"
+	local function ConfigNotify(text)
+		if config.ConfigNotifications == false then return end
+		NovaUI:Notify({ Title = notifyTitle, Content = text, Duration = 5 })
+	end
+
+	--- Window.Configs — the file store behind the config buttons.
+	--- .Folder is where it reads and writes; .Ready is false when the host
+	--- has no filesystem at all (Studio), in which case every method below
+	--- is a no-op returning false and the UI falls back to signals only.
+	local Configs = {
+		Folder = configFolder,
+		Extension = configExtension,
+		Ready = FS.Ready,
+		-- name -> json for configs written this session. Reading straight back
+		-- what was just written is pointless, and briefly stale on some
+		-- executors, so the in-memory copy wins.
+		_recent = {},
+		_autoLoaded = false,
+	}
+
+	--- Window.Configs:List() — config names currently on disk.
+	function Configs:List() return ListConfigNames() end
+	--- Window.Configs:Path(name) — where that config's file lives.
+	function Configs:Path(name) return ConfigPath(name) end
+	--- Window.Configs:Exists(name) — true if it's saved (or written this
+	--- session and not yet flushed).
+	function Configs:Exists(name)
+		if name == nil or name == "" then return false end
+		if Configs._recent[name] ~= nil then return true end
+		return FS.Ready and FS.IsFile(ConfigPath(name)) or false
+	end
+
+	--- Window.Configs:Refresh() — re-reads the folder into the selector's
+	--- list. Returns the names it found.
+	function Configs:Refresh()
+		local names = ListConfigNames()
+		ConfigSelector:SetOptions(names)
+		return names
+	end
+
+	-- Raw write, no toast and no signal — the notifying paths below call it.
+	local function WriteConfig(name, json)
+		if not FS.Ready or name == nil or name == "" then return false end
+		if not EnsureFolder(configFolder) then return false end
+		local ok = pcall(FS.WriteFile, ConfigPath(name), json)
+		if ok then Configs._recent[name] = json end
+		return ok
+	end
+
+	--- Window.Configs:Load(name) — reads that config and pushes it into every
+	--- registered option. This is what selecting a name in the dropdown does.
+	function Configs:Load(name)
+		if name == nil or name == "" then return false end
+		local json = Configs._recent[name]
+		if json == nil then
+			if not FS.Ready or not FS.IsFile(ConfigPath(name)) then return false end
+			local ok, contents = pcall(FS.ReadFile, ConfigPath(name))
+			if not ok or type(contents) ~= "string" or contents == "" then return false end
+			json = contents
+			Configs._recent[name] = json
+		end
+		if not NovaUI:ApplyConfig(json) then return false end
+		ConfigNotify("Loaded " .. name .. " config.")
+		return true
+	end
+
+	--- Window.Configs:Save(name) — writes the CURRENT state of every option
+	--- over that config (defaults to the selected one). Goes through the same
+	--- signal the save button fires, so any OnSave listener still runs.
+	function Configs:Save(name)
+		name = name or ConfigSelector.Value
+		if name == nil or name == "" then return false end
+		ConfigSelector.Save:Fire(name, NovaUI:ExportConfigJSON())
+		return true
+	end
+
+	--- Window.Configs:Create(name) — same as the Create Config button: writes
+	--- current state to a new file and adds it to the list.
+	function Configs:Create(name)
+		if name == nil or name == "" then return false end
+		ConfigSelector:AddOption(name)
+		ConfigSelector:SetValue(name)
+		ConfigSelector.Created:Fire(name, NovaUI:ExportConfigJSON())
+		return true
+	end
+
+	--- Window.Configs:Delete(name) — removes the file and drops it from the
+	--- list (which also clears the autoload mark if it pointed there).
+	--- Needs delfile; returns false on an executor without it rather than
+	--- leaving a half-deleted config behind.
+	function Configs:Delete(name)
+		if not FS.Ready or name == nil or name == "" then return false end
+		if type(FS.DeleteFile) ~= "function" then return false end
+		local path = ConfigPath(name)
+		if FS.IsFile(path) and not pcall(FS.DeleteFile, path) then return false end
+		Configs._recent[name] = nil
+		ConfigSelector:RemoveOption(name)
+		ConfigNotify("Deleted " .. name .. " config.")
+		return true
+	end
+
+	--- Window.Configs:AutoLoad() — the implementation behind
+	--- Window:StartAutoLoad(). Selects and loads whichever config is marked
+	--- for autoload, if it still exists. Never runs on its own: only the
+	--- calling script knows when every option has been registered, and a
+	--- config applied before that lands on nothing. Loads once per window;
+	--- later calls return false.
+	function Configs:AutoLoad()
+		if Configs._autoLoaded then return false end
+		local name = ReadAutoLoadName()
+		if name == nil then return false end
+		if not Configs:Exists(name) then
+			-- Marked config was deleted out from under the marker.
+			ConfigSelector:SetAutoLoad(nil)
+			return false
+		end
+		Configs._autoLoaded = true
+		ConfigSelector:SetAutoLoad(name, true)
+		-- SetValue fires Changed, and the handler below is what actually reads
+		-- and applies the file — the exact path picking it from the list takes.
+		ConfigSelector:SetValue(name)
+		return true
+	end
+
+	-- The store listening on its own signals (rather than the buttons calling
+	-- it directly) is what keeps a consumer's existing OnSave/OnCreate/
+	-- OnChanged handlers working untouched.
+	ConfigSelector:OnChanged(function(name)
+		Configs:Load(name)
+	end)
+	ConfigSelector:OnSave(function(name, json)
+		if WriteConfig(name, json) then
+			ConfigNotify("Saved " .. name .. " config.")
+		end
+	end)
+	ConfigSelector:OnCreate(function(name, json)
+		if WriteConfig(name, json) then
+			ConfigNotify("Created " .. name .. " config.")
+		end
+	end)
+	ConfigSelector:OnAutoLoad(function(name)
+		WriteAutoLoadName(name)
+	end)
+
+	if FS.Ready then
+		-- Read the marker BEFORE filling the list: SetOptions prunes a mark
+		-- pointing at a name it can't find, and at this point the selector
+		-- doesn't know about one yet.
+		local marked = ReadAutoLoadName()
+		Configs:Refresh()
+		if marked ~= nil then
+			-- Silent — restoring a saved mark shouldn't write it straight back.
+			ConfigSelector:SetAutoLoad(marked, true)
+		end
 	end
 
 	SelectorPill.MouseButton1Click:Connect(function()
@@ -2457,6 +2891,18 @@ function NovaUI:CreateWindow(config)
 	end)
 	SaveConfigBtn.MouseButton1Click:Connect(function()
 		ConfigSelector.Save:Fire(ConfigSelector.Value, NovaUI:ExportConfigJSON())
+	end)
+
+	AutoLoadBtn.MouseButton1Click:Connect(function()
+		-- One button both sets and clears, toggling the mark on whatever is
+		-- currently selected.
+		local selected = ConfigSelector.Value
+		if selected == nil or selected == "" then return end
+		if ConfigSelector.AutoLoad == selected then
+			ConfigSelector:SetAutoLoad(nil)
+		else
+			ConfigSelector:SetAutoLoad(selected)
+		end
 	end)
 	CreateConfigBtn.MouseButton1Click:Connect(function()
 		Window:Dialog({
@@ -2479,6 +2925,7 @@ function NovaUI:CreateWindow(config)
 		})
 	end)
 	Window.ConfigSelector = ConfigSelector
+	Window.Configs = Configs
 	Window.Search = { Box = SearchBox }
 
 	--- Window:LoadConfig(data) — data is a JSON string (or plain table) of
@@ -2488,6 +2935,25 @@ function NovaUI:CreateWindow(config)
 	--- library only handles turning it back into on-screen state.
 	function Window:LoadConfig(data)
 		return NovaUI:ApplyConfig(data)
+	end
+
+	--- Window:StartAutoLoad() — call this ONCE, as the last line of your setup,
+	--- after every tab/section/element has been added. If a config is marked
+	--- for autoload it gets selected and applied; returns true when one was
+	--- loaded, false when there's no mark, the marked config is gone, or
+	--- autoload already ran for this window.
+	---
+	--- It's a separate call rather than something CreateWindow does for you
+	--- because a config can only reach options that already exist, and options
+	--- register as you build — at CreateWindow time there are none, so an
+	--- automatic pass would quietly apply a config to nothing. Only the script
+	--- doing the building knows when that's finished.
+	---
+	---   local Window = NovaUI:CreateWindow({ Title = "...", Folder = "Overflow" })
+	---   -- ... build every tab and section ...
+	---   Window:StartAutoLoad()
+	function Window:StartAutoLoad()
+		return Configs:AutoLoad()
 	end
 
 	function Window:SelectTab(index)
