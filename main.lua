@@ -970,6 +970,8 @@ function NovaUI:CreateWindow(config)
 	local size = config.Size or UDim2.fromOffset(600, 480)
 	local railWidth = config.TabWidth or 64
 	local topBarHeight = 64
+	-- Logo block at the top of the sidebar; the tab rail starts just below it.
+	local logoBoxHeight = 56
 
 	-- The search / config-selector pills in the top bar. Both still fill the
 	-- row's height; only their width is set here (the selector's popup is
@@ -1379,7 +1381,7 @@ function NovaUI:CreateWindow(config)
 
 	local LogoBox = New("Frame", {
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, 56),
+		Size = UDim2.new(1, 0, 0, logoBoxHeight),
 		Parent = Sidebar,
 	})
 	local logoMark = New("Frame", {
@@ -1412,8 +1414,8 @@ function NovaUI:CreateWindow(config)
 	local TabRailScroll = New("ScrollingFrame", {
 		Name = "TabRail",
 		BackgroundTransparency = 1,
-		Position = UDim2.new(0, 0, 0, 56),
-		Size = UDim2.new(1, 0, 1, -132),
+		Position = UDim2.new(0, 0, 0, logoBoxHeight),
+		Size = UDim2.new(1, 0, 1, -132), -- repointed by RefreshTabRailHeight below
 		CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollBarThickness = 0,
@@ -1430,11 +1432,17 @@ function NovaUI:CreateWindow(config)
 	-- Populated below, after Window:AddSidebarButton exists — either with
 	-- config.SidebarButtons (fully customizable icon buttons) or a
 	-- sensible default (collapse + profile).
+	-- Height comes from whatever ends up in it rather than a fixed number:
+	-- it used to be a flat 76px, which is exactly two 32px buttons plus the
+	-- gap, so one button left 44px of dead rail above it and three ran off
+	-- the bottom of the sidebar. AnchorPoint is the bottom edge, so growing
+	-- taller pushes upward and the 12px bottom margin stays put.
 	local SidebarFooter = New("Frame", {
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(0.5, 1),
 		Position = UDim2.new(0.5, 0, 1, -12),
-		Size = UDim2.new(1, 0, 0, 76),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = Sidebar,
 	})
 	New("UIListLayout", {
@@ -1443,6 +1451,17 @@ function NovaUI:CreateWindow(config)
 		Padding = UDim.new(0, 10),
 		Parent = SidebarFooter,
 	})
+
+	-- The rail fills what's left between the logo and the footer, so it has
+	-- to be repointed whenever the footer's height changes — otherwise a
+	-- one-button footer leaves a gap the rail could have scrolled into, and
+	-- a three-button one gets overlapped by it. The offset works out to the
+	-- old hardcoded -132 for the two-button case this replaced.
+	local function RefreshTabRailHeight()
+		TabRailScroll.Size = UDim2.new(1, 0, 1, -(logoBoxHeight + SidebarFooter.AbsoluteSize.Y))
+	end
+	SidebarFooter:GetPropertyChangedSignal("AbsoluteSize"):Connect(RefreshTabRailHeight)
+	RefreshTabRailHeight()
 
 	--=========================================================================
 	-- CONTENT AREA (search/selector bar + tab pages)
