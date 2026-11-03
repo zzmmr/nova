@@ -17,8 +17,8 @@
 		Rotation:AddToggle("Look", { Title = "Look", Default = true })
 		Window:StartAutoLoad()
 
-	Settings tab: every window gets one, pinned to the right end of the tab
-	bar. It carries the whole config store that lives on NovaUI's top ribbon —
+	Settings tab: every window gets one, always the last tab in the bar
+	(after every tab the script adds). It carries the whole config store that lives on NovaUI's top ribbon —
 	pick (= load), create, save, delete, refresh, set/clear autoload — plus
 	the menu keybind and a couple of interface switches. `SettingsTab = false`
 	turns it off; `Window.SettingsTab:AddSection(...)` adds your own sections.
@@ -1079,23 +1079,6 @@ function Ren:CreateWindow(config)
 		Parent = TabScroll,
 	})
 	Row(TabList, 4)
-
-	-- The settings tab is pinned to the right end of the bar, outside the
-	-- scroller, so it stays reachable however many tabs there are.
-	local SettingsHolder = New("Frame", {
-		BackgroundTransparency = 1,
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, -10, 0, 0),
-		AutomaticSize = Enum.AutomaticSize.X,
-		Size = UDim2.fromScale(0, 1),
-		Parent = TabBar,
-	})
-	Row(SettingsHolder, 0, Enum.HorizontalAlignment.Right)
-	local function RefreshTabScrollWidth()
-		local reserved = SettingsHolder.AbsoluteSize.X
-		TabScroll.Size = UDim2.new(1, -(20 + (reserved > 0 and reserved + 8 or 0)), 1, 0)
-	end
-	SettingsHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(RefreshTabScrollWidth)
 
 	local Indicator = New("Frame", {
 		Name = "Indicator",
@@ -3616,6 +3599,25 @@ function Ren:CreateWindow(config)
 		end
 	end
 
+	-- Scrolls the tab bar just far enough to show the tab's button; Settings
+	-- sits at the far end, so the header's "Manage configs" can land on it
+	-- while it's scrolled out of view.
+	local function ScrollTabIntoView(tab)
+		local btn = tab._button
+		local x = TabScroll.CanvasPosition.X
+		local left = btn.AbsolutePosition.X - TabScroll.AbsolutePosition.X + x
+		local right = left + btn.AbsoluteSize.X
+		local view = TabScroll.AbsoluteSize.X
+		if left < x then
+			x = left
+		elseif right > x + view then
+			x = right - view
+		end
+		if x ~= TabScroll.CanvasPosition.X then
+			TabScroll.CanvasPosition = Vector2.new(math.max(x, 0), 0)
+		end
+	end
+
 	--- Window:SelectTab(indexOrTab) — 1-based over the tabs you added (the
 	--- built-in settings tab isn't counted; pass Window.SettingsTab for it).
 	function Window:SelectTab(target, instant)
@@ -3638,17 +3640,18 @@ function Ren:CreateWindow(config)
 		tab._page.Visible = true
 		PaintTab(tab, true, not instant)
 		if previous ~= tab and not instant then
-			local fromRight = (tab._index or math.huge) > (previous and previous._index or 0)
+			local fromRight = tab._button.LayoutOrder > (previous and previous._button.LayoutOrder or 0)
 			tab._page.Position = UDim2.fromOffset(fromRight and 10 or -10, 0)
 			Tween(tab._page, { Position = UDim2.fromOffset(0, 0) }, 0.2, EASE_SOFT)
 		else
 			tab._page.Position = UDim2.fromOffset(0, 0)
 		end
+		ScrollTabIntoView(tab)
 		UpdateIndicator(not instant and previous ~= nil)
 		ApplySearchFilter()
 	end
 
-	local function CreateTab(tabConfig, pinned)
+	local function CreateTab(tabConfig)
 		local button = New("TextButton", {
 			Text = "",
 			AutoButtonColor = false,
@@ -3656,7 +3659,7 @@ function Ren:CreateWindow(config)
 			BackgroundTransparency = 1,
 			AutomaticSize = Enum.AutomaticSize.X,
 			Size = UDim2.fromOffset(0, 28),
-			Parent = pinned and SettingsHolder or TabList,
+			Parent = TabList,
 		})
 		Round(button, 7)
 		Pad(button, 10, 0, 12, 0)
@@ -3812,7 +3815,7 @@ function Ren:CreateWindow(config)
 
 	--- Window:AddTab({ Title, Icon }) -> Tab. The first tab added is selected.
 	function Window:AddTab(tabConfig)
-		local tab = CreateTab(tabConfig or {}, false)
+		local tab = CreateTab(tabConfig or {})
 		table.insert(self._tabs, tab)
 		tab._index = #self._tabs
 		tab._button.LayoutOrder = tab._index
@@ -4246,9 +4249,11 @@ function Ren:CreateWindow(config)
 	--=========================================================================
 
 	if config.SettingsTab ~= false then
-		local settings = CreateTab({ Title = config.SettingsTitle or "Settings", Icon = config.SettingsIcon or "settings" }, true)
+		local settings = CreateTab({ Title = config.SettingsTitle or "Settings", Icon = config.SettingsIcon or "settings" })
+		-- Created before any of the script's tabs, but ordered after all of
+		-- them so it always ends the list.
+		settings._button.LayoutOrder = 2 ^ 30
 		Window.SettingsTab = settings
-		RefreshTabScrollWidth()
 
 		local syncing = false
 		local function Trim(text)
