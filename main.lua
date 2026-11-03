@@ -50,6 +50,9 @@
 	middle of the screen (MinimizePosition = UDim2 anchor point, default
 	the screen center; MinimizedSize = px, default 40). Tap it to restore;
 	drag it to move it out of the way.
+
+	The window (or the minimized button) turns semi-transparent while it's
+	dragged: DragTransparency = 0..1, default 0.5; false turns it off.
 --]]
 
 local TweenService = game:GetService("TweenService")
@@ -246,12 +249,15 @@ end
 -- Movement/end are tracked on the global UserInputService rather than the
 -- handle: the cursor leaves a small handle almost immediately during a drag,
 -- and the handle's own InputChanged stops firing the moment it does.
-local function MakeDraggable(frame, handle, track, canDrag)
-	local dragging, dragStart, startPos = false, nil, nil
+-- onDrag(true) fires once the pointer has actually moved a few pixels (a
+-- plain click or tap never triggers it), onDrag(false) when that drag ends.
+local function MakeDraggable(frame, handle, track, canDrag, onDrag)
+	local dragging, moved, dragStart, startPos = false, false, nil, nil
 	track(handle.InputBegan:Connect(function(input)
 		if canDrag and not canDrag() then return end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
+			moved = false
 			dragStart = input.Position
 			startPos = frame.Position
 		end
@@ -259,12 +265,18 @@ local function MakeDraggable(frame, handle, track, canDrag)
 	track(UserInputService.InputChanged:Connect(function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
+			if not moved and delta.Magnitude >= 3 then
+				moved = true
+				if onDrag then onDrag(true) end
+			end
 			frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
 	end))
 	track(UserInputService.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			if dragging and moved and onDrag then onDrag(false) end
 			dragging = false
+			moved = false
 		end
 	end))
 end
@@ -1560,11 +1572,49 @@ function Ren:CreateWindow(config)
 	Window._searchText = ""
 	Window.Search = { Box = SearchBox }
 
+	-- While it's being dragged the window turns see-through so what's behind
+	-- it stays visible (DragTransparency, default 0.5; false turns it off).
+	-- Main is lifted into a screen-sized CanvasGroup for the drag only, so it
+	-- fades as one flat layer, stroke and shadow included; living in a
+	-- CanvasGroup all the time would render the whole window via a texture.
+	local dragTransparency = config.DragTransparency
+	if dragTransparency == nil then dragTransparency = 0.5 end
+	local DragGroup
+	if dragTransparency then
+		local ok, group = pcall(New, "CanvasGroup", {
+			Name = "DragFade",
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 1),
+			Visible = false,
+			Parent = ScreenGui,
+		})
+		DragGroup = ok and group or nil
+	end
+	local dragFadeToken = 0
+	local function SetDragFade(dragging)
+		if not DragGroup then return end
+		dragFadeToken = dragFadeToken + 1
+		local token = dragFadeToken
+		if dragging then
+			DragGroup.ZIndex = Main.ZIndex
+			DragGroup.Visible = true
+			Main.Parent = DragGroup
+			Tween(DragGroup, { GroupTransparency = dragTransparency }, 0.12)
+		else
+			Tween(DragGroup, { GroupTransparency = 0 }, 0.12)
+			task.delay(0.12, function()
+				if token ~= dragFadeToken then return end
+				Main.Parent = ScreenGui
+				DragGroup.Visible = false
+			end)
+		end
+	end
+
 	local function CanDrag()
 		return not Window._fullscreen
 	end
-	MakeDraggable(Main, Brand, Track, CanDrag)
-	MakeDraggable(Main, HeaderSpacer, Track, CanDrag)
+	MakeDraggable(Main, Brand, Track, CanDrag, SetDragFade)
+	MakeDraggable(Main, HeaderSpacer, Track, CanDrag, SetDragFade)
 
 	--=========================================================================
 	-- MINIMIZE: Main itself shrinks into a small round button (the logo)
@@ -1711,7 +1761,7 @@ function Ren:CreateWindow(config)
 	-- Activated rather than MouseButton1Click so a tap on touch counts too.
 	do
 		local pressedAt
-		MakeDraggable(Main, MiniButton, Track)
+		MakeDraggable(Main, MiniButton, Track, nil, SetDragFade)
 		MiniButton.InputBegan:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 				pressedAt = Main.AbsolutePosition
