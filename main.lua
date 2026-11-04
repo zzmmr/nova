@@ -1174,6 +1174,16 @@ function Ren:CreateWindow(config)
 		return point.X >= p.X and point.X <= p.X + s.X and point.Y >= p.Y and point.Y <= p.Y + s.Y
 	end
 
+	-- Whether a processed press was meant for a UI rather than the game:
+	-- typing in a text box, or a click on this window or an open popup.
+	local function IsUiPress(input)
+		local kind = input.UserInputType
+		if kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.MouseButton2 or kind == Enum.UserInputType.MouseButton3 then
+			return ScreenGui.Enabled and (#PopupStack > 0 or PointIn(Main, input.Position))
+		end
+		return UserInputService:GetFocusedTextBox() ~= nil
+	end
+
 	local function PlacePopup(popup, anchor, opts)
 		local screen = Overlay.AbsoluteSize
 		local scale = popup:FindFirstChildOfClass("UIScale")
@@ -3349,7 +3359,14 @@ function Ren:CreateWindow(config)
 					return
 				end
 
-				if processed or not KeybindMatches(Keybind.Value, input) then return end
+				if not KeybindMatches(Keybind.Value, input) then return end
+				-- A hold follows the physical key, so a press the game consumed
+				-- (a sunk ContextAction, a click on its GUI) still starts it.
+				local ignored = processed
+				if Keybind.Mode == "Hold" then
+					ignored = processed and IsUiPress(input)
+				end
+				if ignored then return end
 				if Keybind.Mode == "Toggle" then
 					Keybind._state = not Keybind._state
 					if Keybind._state then Keybind.Click:Fire() end
@@ -3364,6 +3381,8 @@ function Ren:CreateWindow(config)
 			end))
 			Track(UserInputService.InputEnded:Connect(function(input)
 				if Keybind.Mode ~= "Hold" or not KeybindMatches(Keybind.Value, input) then return end
+				-- Releases always arrive, including for presses ignored above.
+				if not Keybind._state then return end
 				Keybind._state = false
 				Keybind.Changed:Fire(false)
 				SafeCall(cfg.Callback, false)
