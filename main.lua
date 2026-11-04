@@ -53,6 +53,26 @@
 
 	The window (or the minimized button) turns semi-transparent while it's
 	dragged: DragTransparency = 0..1, default 0.5; false turns it off.
+
+	Floating frames are separate draggable panels that stay up while the menu
+	is hidden. Create them after the window so they pick up its Accent; the X
+	only hides one (:SetVisible(true) brings it back, :OnClose(fn) tells you),
+	and closing the window destroys them. A frame fits its content up to
+	MaxHeight (default 380, the window's height), then scrolls.
+
+		local Status = Ren:CreateStatus({ Status = "Running" })
+		Status:SetStatus("Paused")          -- "Running", "Paused" or "Error"
+		Status:Log("Waiting for coins")     -- Status:Log(text, "Error") tints it
+
+		local Stats = Ren:CreateStatistics({ Title = "Overflow statistics" })
+		local Hatches = Stats:AddStat({ Title = "Hatches", Icon = "egg", Value = 0 })
+		local Rate = Stats:AddGraph({ Title = "Coins / min", Icon = "chart-line" })
+		local Pets = Stats:AddImageHolder({ Title = "Pets", Icon = "paw-print" })
+		local Notes = Stats:AddText({ Title = "Session", Content = "Started." })
+		Hatches:Increment(3)
+		Rate:Push(1200)
+		Pets:AddImage({ Image = "rbxassetid://123", Title = "Dog", Count = 3 })
+		Notes:SetContent("Hatching.")
 --]]
 
 local TweenService = game:GetService("TweenService")
@@ -62,6 +82,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local HttpService = game:GetService("HttpService")
 local TextService = game:GetService("TextService")
+local GuiService = game:GetService("GuiService")
+local TextChatService = game:GetService("TextChatService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -92,6 +114,8 @@ local Themes = {
 		Divider = Color3.fromRGB(27, 27, 35),
 		Knob = Color3.fromRGB(62, 62, 78),
 		Danger = Color3.fromRGB(255, 92, 102),
+		Warning = Color3.fromRGB(245, 190, 80),
+		Success = Color3.fromRGB(110, 220, 120),
 	},
 }
 
@@ -281,6 +305,42 @@ local function MakeDraggable(frame, handle, track, canDrag, onDrag)
 	end))
 end
 
+-- See-through while dragged, so what's behind the frame stays visible
+-- (`transparency` defaults to 0.5; false turns it off). The frame is lifted
+-- into a screen-sized CanvasGroup for the drag only, so it fades as one flat
+-- layer, stroke and shadow included; living in a CanvasGroup all the time
+-- would render it through a texture. Returns MakeDraggable's onDrag.
+local function DragFade(frame, gui, transparency)
+	if transparency == nil then transparency = 0.5 end
+	if not transparency then return nil end
+	local ok, group = pcall(New, "CanvasGroup", {
+		Name = "DragFade",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Visible = false,
+		Parent = gui,
+	})
+	if not ok then return nil end
+	local token = 0
+	return function(dragging)
+		token = token + 1
+		local current = token
+		if dragging then
+			group.ZIndex = frame.ZIndex
+			group.Visible = true
+			frame.Parent = group
+			Tween(group, { GroupTransparency = transparency }, 0.12)
+		else
+			Tween(group, { GroupTransparency = 0 }, 0.12)
+			task.delay(0.12, function()
+				if current ~= token or not gui.Parent then return end
+				frame.Parent = gui
+				group.Visible = false
+			end)
+		end
+	end
+end
+
 -- Every shadow is remembered (weakly) so SetReducedEffects can switch the
 -- ones that already exist, not just the ones created afterwards.
 local Shadows = setmetatable({}, { __mode = "k" })
@@ -419,14 +479,16 @@ local LUCIDE_FALLBACK = {
 	menu={5,49,820}, ["shopping-cart"]={6,869,257}, crosshair={7,453,869}, target={4,514,771}, shield={6,869,0}, wrench={4,820,906},
 	home={9,820,147}, ["gamepad-2"]={2,710,967}, star={6,967,147}, sparkles={6,918,49}, bolt={3,306,820}, wifi={4,869,808},
 	gauge={2,771,955}, clock={7,771,661}, ["map-pin"]={5,820,257}, list={9,869,808}, ["mouse-pointer-click"]={5,771,710}, power={1,820,147},
-	pencil={1,820,257}, plus={1,257,918}, pin={1,918,0}, box={3,771,196}, ["move-diagonal-2"]={5,918,661}, ["log-out"]={9,453,967},
-	globe={9,820,612}, music={5,404,869}, rocket={1,967,355}, bot={3,98,820}, users={4,661,918}, key={9,563,820},
-	lock={9,918,710}, cpu={7,918,147}, terminal={4,710,820}, code={7,98,869}, ghost={9,869,453}, ["wand-sparkles"]={4,820,710},
-	flame={2,967,563}, heart={9,869,661}, skull={6,869,808}, radar={1,857,710}, ["scan-eye"]={1,820,808}, ["person-standing"]={1,563,771},
-	package={5,820,857}, hammer={9,98,918}, car={3,563,869}, plane={1,98,869}, timer={4,661,771}, compass={7,869,808},
-	bug={3,196,710}, paintbrush={5,869,355}, image={9,355,869}, ["volume-2"]={4,869,563}, activity={8,869,355},
+	pencil={1,820,257}, plus={1,257,918}, pin={1,918,0}, box={3,771,196}, ["move-diagonal-2"]={5,967,49}, ["log-out"]={9,820,955},
+	globe={9,771,563}, music={5,967,563}, rocket={1,918,147}, bot={3,869,98}, users={4,967,98}, key={9,869,404},
+	lock={9,918,857}, cpu={7,196,869}, terminal={4,820,257}, code={7,355,869}, ghost={2,869,906}, ["wand-sparkles"]={4,453,918},
+	flame={2,967,306}, heart={9,661,771}, skull={6,49,869}, radar={1,820,404}, ["scan-eye"]={1,869,759}, ["person-standing"]={1,563,771},
+	package={5,918,196}, hammer={9,306,820}, car={3,918,147}, plane={1,98,820}, timer={4,918,0}, compass={7,514,967},
+	bug={3,257,967}, paintbrush={5,918,453}, image={9,306,918}, ["volume-2"]={4,771,808}, activity={8,514,771},
+	egg={2,514,771}, coins={7,869,612}, ["paw-print"]={1,771,257}, ["line-chart"]={9,196,918}, ["trending-up"]={4,514,918}, gem={2,918,857},
+	trophy={4,820,147}, ["scroll-text"]={1,967,759}, hourglass={9,49,918}, wallet={4,147,967},
 }
-local ICON_ALIASES = { house = "home", cog = "settings", close = "x", ["more-horizontal"] = "ellipsis", gear = "settings" }
+local ICON_ALIASES = { house = "home", cog = "settings", close = "x", ["more-horizontal"] = "ellipsis", gear = "settings", ["chart-line"] = "line-chart" }
 
 local FallbackIcons
 do
@@ -751,6 +813,14 @@ local function CapturingKeybind()
 	return KeybindCapture.Active > 0 or (os.clock() - KeybindCapture.LastEnded) < 0.15
 end
 
+-- The default chat box lives in CoreGui, out of GetFocusedTextBox's sight.
+local function ChatInputFocused()
+	local ok, focused = pcall(function()
+		return TextChatService.ChatInputBarConfiguration.IsFocused
+	end)
+	return ok and focused == true
+end
+
 --=============================================================================
 -- NOTIFICATIONS
 --=============================================================================
@@ -932,6 +1002,940 @@ function Ren:Notify(config)
 end
 
 --=============================================================================
+-- SHARED CHROME
+--=============================================================================
+
+local function IconButton(parent, iconName, sizePx, iconSize, hoverColor)
+	local theme = Ren.Theme
+	local btn = New("TextButton", {
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundColor3 = theme.ElementBackground,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(sizePx, sizePx),
+		Parent = parent,
+	})
+	Round(btn, 6)
+	local image = Icon(iconName, iconSize or 14, theme.SubText, {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Parent = btn,
+	})
+	btn.MouseEnter:Connect(function()
+		Tween(btn, { BackgroundTransparency = 0 }, 0.1)
+		if image then Tween(image, { ImageColor3 = hoverColor or theme.Text }, 0.1) end
+	end)
+	btn.MouseLeave:Connect(function()
+		Tween(btn, { BackgroundTransparency = 1 }, 0.1)
+		if image then Tween(image, { ImageColor3 = theme.SubText }, 0.1) end
+	end)
+	local handle = { Instance = btn }
+	function handle.SetIcon(name)
+		if image then image:Destroy() end
+		image = Icon(name, iconSize or 14, theme.SubText, {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Parent = btn,
+		})
+	end
+	return handle
+end
+
+-- A Lucide name gets the accent tint; a real image keeps its colors.
+local function AddLogo(parent, image, layoutOrder)
+	local isGlyph = type(image) == "string" and not image:find("://")
+	local size = isGlyph and 18 or 22
+	local holder = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(size, size),
+		LayoutOrder = layoutOrder,
+		Parent = parent,
+	})
+	local logo = Icon(image, size, isGlyph and Ren.Theme.Accent or nil, {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		ZIndex = 2,
+		Parent = holder,
+	})
+	if logo then
+		AddGlow(holder, size, Ren.Theme.Accent)
+	end
+	return holder
+end
+
+--=============================================================================
+-- FLOATING FRAMES: draggable panels outside the window, so they stay up while
+-- the menu is hidden. Ren:CreateStatus and Ren:CreateStatistics.
+--=============================================================================
+
+local FRAME_HEADER = 40
+local FRAME_PADDING = 10
+-- The window's starting height, and how tall a frame gets before it scrolls.
+local WINDOW_HEIGHT = 380
+
+-- Closing the window unloads the library, and takes these along.
+local FloatingFrames = {}
+
+-- A vertical scroller and the frame its content goes in. Inset by position
+-- and size: a ScrollingFrame's Scale-sized children ignore a UIPadding.
+local function Scroller(parent, insetX, insetY)
+	local scroll = New("ScrollingFrame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = Ren.Theme.ElementBackgroundHover,
+		VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar,
+		Parent = parent,
+	})
+	local inner = New("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(insetX, insetY),
+		Size = UDim2.new(1, -insetX * 2, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Parent = scroll,
+	})
+	Pad(inner, 0, 0, 0, insetY)
+	return scroll, inner
+end
+
+-- The panel both frames share: header (logo, title, close) over a body that
+-- hugs its content up to MaxHeight, then scrolls.
+local function CreateFloatingFrame(config, defaults)
+	local theme = Ren.Theme
+	local width = config.Width or defaults.Width
+
+	-- Connections on global services outlive the ScreenGui; dropped in Destroy.
+	local connections = {}
+	local function Track(conn)
+		table.insert(connections, conn)
+		return conn
+	end
+
+	local gui = New("ScreenGui", {
+		Name = defaults.Name,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		-- Under the window (100), so its popups stay above a frame.
+		DisplayOrder = 90,
+	})
+	MountGui(gui, config.Parent)
+
+	local main = New("Frame", {
+		Name = "Main",
+		-- Active so a click on the frame doesn't fall through to the game.
+		Active = true,
+		BackgroundColor3 = theme.Header,
+		Position = config.Position or defaults.Position(width),
+		Size = UDim2.fromOffset(width, FRAME_HEADER),
+		ClipsDescendants = true,
+		Parent = gui,
+	})
+	Round(main, 10)
+	Stroke(main, theme.Border, 1)
+	AddShadow(main, { Transparency = 0.25, OffsetY = 8, Blur = 22 })
+	local scale = New("UIScale", { Parent = main })
+
+	local header = New("Frame", {
+		Name = "Header",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, FRAME_HEADER),
+		Parent = main,
+	})
+	Pad(header, 14, 0, 8, 0)
+	Row(header, 8)
+	local logo = config.Logo
+	if logo == nil then logo = defaults.Logo end
+	if logo then
+		AddLogo(header, logo, 1)
+	end
+	local title = Label({
+		Text = config.Title or defaults.Title,
+		FontFace = Fonts.Bold,
+		TextSize = 13.5,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Size = UDim2.fromScale(0, 1),
+		LayoutOrder = 2,
+		Parent = header,
+	})
+	New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = title })
+
+	local body = New("Frame", {
+		Name = "Body",
+		BackgroundColor3 = theme.Background,
+		Position = UDim2.fromOffset(0, FRAME_HEADER),
+		Size = UDim2.new(1, 0, 1, -FRAME_HEADER),
+		Parent = main,
+	})
+	Round(body, 10, { TopLeft = 0, TopRight = 0 })
+	New("Frame", {
+		Name = "Line",
+		BackgroundColor3 = theme.Divider,
+		Size = UDim2.new(1, 0, 0, 1),
+		Parent = body,
+	})
+	local _, content = Scroller(body, FRAME_PADDING, FRAME_PADDING)
+	List(content, { Padding = UDim.new(0, 10) })
+
+	local function FitHeight()
+		local wanted = content.AbsoluteSize.Y / scale.Scale + FRAME_PADDING
+		local limit = math.max(math.min(config.MaxHeight or WINDOW_HEIGHT, gui.AbsoluteSize.Y - 32) - FRAME_HEADER, 80)
+		main.Size = UDim2.fromOffset(width, FRAME_HEADER + math.min(wanted, limit))
+	end
+	content:GetPropertyChangedSignal("AbsoluteSize"):Connect(FitHeight)
+	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(FitHeight)
+	task.defer(FitHeight)
+
+	local Frame = {
+		Instance = main,
+		Content = content,
+		Visible = true,
+		Destroyed = false,
+		Closed = Signal.new(),
+	}
+
+	function Frame:SetVisible(visible)
+		if Frame.Destroyed then return end
+		Frame.Visible = visible and true or false
+		gui.Enabled = Frame.Visible
+		if Frame.Visible then PopIn(main) end
+	end
+	function Frame:SetTitle(text)
+		title.Text = tostring(text)
+	end
+	--- Fires when the X closes it (the frame only hides; :SetVisible(true) brings it back).
+	function Frame:OnClose(fn)
+		return Frame.Closed:Connect(fn)
+	end
+	function Frame:Destroy()
+		if Frame.Destroyed then return end
+		Frame.Destroyed = true
+		for _, conn in ipairs(connections) do
+			if conn.Connected then conn:Disconnect() end
+		end
+		table.clear(connections)
+		gui:Destroy()
+		local index = table.find(FloatingFrames, Frame)
+		if index then table.remove(FloatingFrames, index) end
+	end
+
+	if config.Closable ~= false then
+		local close = IconButton(header, "x", 24, 13, theme.Danger)
+		close.Instance.LayoutOrder = 3
+		close.Instance.MouseButton1Click:Connect(function()
+			Frame:SetVisible(false)
+			Frame.Closed:Fire()
+		end)
+	end
+
+	MakeDraggable(main, header, Track, nil, DragFade(main, gui, config.DragTransparency))
+	table.insert(FloatingFrames, Frame)
+	if config.Visible == false then
+		Frame:SetVisible(false)
+	else
+		PopIn(main)
+	end
+	return Frame
+end
+
+--- Ren:CreateStatus({ Title, Status, MaxLines, LogHeight, Timestamps, Width, Position, Logo, Closable, Visible, DragTransparency, Parent })
+--- Status:SetStatus("Running" | "Paused" | "Error") — any case; .Value holds it, :OnChanged(fn) follows it.
+--- Status:Log(text, tint) — tint is a status name or a Color3. Status:Clear().
+function Ren:CreateStatus(config)
+	config = config or {}
+	local theme = Ren.Theme
+	local Status = CreateFloatingFrame(config, {
+		Name = "Ren_Status",
+		Title = "Status",
+		Width = 300,
+		-- Mid-left: the top-left corner is under Roblox's chat window, which
+		-- swallows clicks meant for the frame's close button.
+		Position = function()
+			return UDim2.new(0, 16, 0.5, -114)
+		end,
+	})
+	Status.Changed = Signal.new()
+
+	local STATUS_NAMES = { running = "Running", paused = "Paused", error = "Error" }
+	local STATUS_COLORS = { Running = theme.Success, Paused = theme.Warning, Error = theme.Danger }
+
+	local stateRow = New("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 18),
+		LayoutOrder = 1,
+		Parent = Status.Content,
+	})
+	Pad(stateRow, 2, 0, 2, 0)
+	Row(stateRow, 8)
+	local dot = New("Frame", { Size = UDim2.fromOffset(8, 8), LayoutOrder = 1, Parent = stateRow })
+	Pill(dot)
+	local dotGlow = AddShadow(dot, { Transparency = 0.4, Blur = 8 })
+	local stateLabel = Label({
+		FontFace = Fonts.Medium,
+		TextSize = 13,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.fromScale(0, 1),
+		LayoutOrder = 2,
+		Parent = stateRow,
+	})
+
+	local logCard = New("Frame", {
+		BackgroundColor3 = theme.SectionBackground,
+		Size = UDim2.new(1, 0, 0, config.LogHeight or 140),
+		LayoutOrder = 2,
+		Parent = Status.Content,
+	})
+	Round(logCard, 8)
+	Stroke(logCard, theme.Border, 1)
+	local logScroll, logList = Scroller(logCard, 10, 8)
+	List(logList, { Padding = UDim.new(0, 3) })
+	local emptyLabel = Label({
+		Text = "No updates yet",
+		TextSize = 11.5,
+		TextColor3 = theme.DimText,
+		Size = UDim2.new(1, 0, 0, 14),
+		Parent = logList,
+	})
+
+	-- Follows new lines unless the user has scrolled up to read older ones.
+	local followLog = true
+	logScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		followLog = logScroll.CanvasPosition.Y >= logScroll.AbsoluteCanvasSize.Y - logScroll.AbsoluteSize.Y - 4
+	end)
+	logScroll:GetPropertyChangedSignal("AbsoluteCanvasSize"):Connect(function()
+		if followLog then
+			logScroll.CanvasPosition = Vector2.new(0, logScroll.AbsoluteCanvasSize.Y)
+		end
+	end)
+
+	function Status:OnChanged(fn)
+		return Status.Changed:Connect(fn)
+	end
+
+	function Status:SetStatus(name)
+		local resolved = STATUS_NAMES[tostring(name):lower()]
+		if not resolved then
+			warn(string.format("[Ren] Status: unknown status %q. Expected \"Running\", \"Paused\" or \"Error\".", tostring(name)))
+			return
+		end
+		local changed = Status.Value ~= resolved
+		-- The first one is instant, so a new frame doesn't fade in from white.
+		local fade = Status.Value and 0.15 or 0
+		Status.Value = resolved
+		local color = STATUS_COLORS[resolved]
+		stateLabel.Text = resolved
+		Tween(stateLabel, { TextColor3 = color }, fade)
+		Tween(dot, { BackgroundColor3 = color }, fade)
+		if dotGlow then dotGlow.Color = color end
+		if changed then Status.Changed:Fire(resolved) end
+	end
+
+	local lines = {}
+	local lineOrder = 0
+	local maxLines = config.MaxLines or 200
+	local TIME_WIDTH = config.Timestamps ~= false and 54 or 0
+
+	function Status:Log(text, tint)
+		if Status.Destroyed then return end
+		lineOrder = lineOrder + 1
+		emptyLabel.Visible = false
+		local line = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			LayoutOrder = lineOrder,
+			Parent = logList,
+		})
+		if TIME_WIDTH > 0 then
+			Label({
+				Text = os.date("%H:%M:%S"),
+				TextSize = 11,
+				TextColor3 = theme.DimText,
+				TextYAlignment = Enum.TextYAlignment.Top,
+				Size = UDim2.fromOffset(TIME_WIDTH, 14),
+				Parent = line,
+			})
+		end
+		local color = typeof(tint) == "Color3" and tint or STATUS_COLORS[STATUS_NAMES[tostring(tint):lower()]]
+		Label({
+			Text = tostring(text),
+			TextSize = 11.5,
+			TextColor3 = color or theme.SubText,
+			TextWrapped = true,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			Position = UDim2.fromOffset(TIME_WIDTH, 0),
+			Size = UDim2.new(1, -TIME_WIDTH, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = line,
+		})
+		table.insert(lines, line)
+		if #lines > maxLines then
+			table.remove(lines, 1):Destroy()
+		end
+	end
+
+	function Status:Clear()
+		if Status.Destroyed then return end
+		for _, line in ipairs(lines) do
+			line:Destroy()
+		end
+		table.clear(lines)
+		emptyLabel.Visible = true
+	end
+
+	Status:SetStatus(config.Status or "Running")
+	return Status
+end
+
+-- 1000000 -> "1,000,000"; anything that isn't a number is shown as it is.
+local function FormatNumber(value)
+	if type(value) ~= "number" then return tostring(value) end
+	local text = string.format("%.2f", value):gsub("%.?0+$", "")
+	local sign, whole, fraction = text:match("^(-?)(%d+)(.*)$")
+	if not whole then return text end
+	whole = whole:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+	return sign .. whole .. fraction
+end
+
+-- cfg.Format (a function) wins over thousands separators + cfg.Suffix.
+local function FormatStat(value, cfg)
+	if cfg.Format then return tostring(cfg.Format(value)) end
+	return FormatNumber(value) .. (cfg.Suffix or "")
+end
+
+local GRAPH_INSET = 8
+local GRAPH_FILL_STEP = 4
+local STAT_HEIGHT = 58
+
+--- Ren:CreateStatistics({ Title, Logo, Columns, Width, MaxHeight, Position, Closable, Visible, DragTransparency, Parent })
+--- Subframes appear in the order they're added; consecutive stats share rows of `Columns` (default 2):
+---   Stats:AddStat({ Title, Icon, Value, Color, Format, Suffix }) -> :SetValue(v) / :Increment(n) / :SetIcon(name)
+---   Stats:AddGraph({ Title, Icon, Height, MaxPoints, Min, Max, Color, Data, Format, Suffix }) -> :Push(v) / :SetData(list) / :Clear()
+---   Stats:AddImageHolder({ Title, Icon, Columns, TileHeight, Images }) -> :AddImage(item) / :SetImages(list) / :Clear()
+---     item = { Image, Title, Count, Color } -> tile:SetImage / :SetTitle / :SetCount / :SetColor / :SetVisible / :Destroy
+---   Stats:AddText({ Title, Icon, Content }) -> :SetContent(text)
+--- Every subframe also has :SetTitle(text) / :SetVisible(bool) / :Destroy().
+function Ren:CreateStatistics(config)
+	config = config or {}
+	local theme = Ren.Theme
+	local Stats = CreateFloatingFrame(config, {
+		Name = "Ren_Statistics",
+		Title = "Statistics",
+		Logo = Ren.Logo,
+		Width = 340,
+		Position = function(width)
+			return UDim2.new(1, -(width + 16), 0, 72)
+		end,
+	})
+	local content = Stats.Content
+	local statColumns = config.Columns or 2
+
+	local order = 0
+	local function NextOrder()
+		order = order + 1
+		return order
+	end
+
+	local statRow, statRowCount = nil, 0
+
+	-- The look of a tab's section: a small title over a card. Returns the
+	-- subframe's handle, the card to fill and the title row.
+	local function TitledCard(cfg)
+		statRow = nil
+		local holder = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			LayoutOrder = NextOrder(),
+			Parent = content,
+		})
+		List(holder, { Padding = UDim.new(0, 6) })
+		local head = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, 16),
+			LayoutOrder = 1,
+			Visible = cfg.Title ~= nil,
+			Parent = holder,
+		})
+		Pad(head, 2, 0, 2, 0)
+		Row(head, 6)
+		if cfg.Icon then
+			Icon(cfg.Icon, 13, theme.SubText, { LayoutOrder = 1, Parent = head })
+		end
+		local headTitle = Label({
+			Text = cfg.Title or "",
+			FontFace = Fonts.Medium,
+			TextSize = 12.5,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromScale(0, 1),
+			LayoutOrder = 2,
+			Parent = head,
+		})
+		local card = New("Frame", {
+			BackgroundColor3 = theme.SectionBackground,
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			LayoutOrder = 2,
+			Parent = holder,
+		})
+		Round(card, 8)
+		Stroke(card, theme.Border, 1)
+
+		local handle = { Instance = holder }
+		function handle:SetTitle(text)
+			headTitle.Text = tostring(text)
+			head.Visible = true
+		end
+		function handle:SetVisible(visible)
+			holder.Visible = visible and true or false
+		end
+		function handle:Destroy()
+			holder:Destroy()
+		end
+		return handle, card, head
+	end
+
+	function Stats:AddStat(cfg)
+		cfg = cfg or {}
+		if not statRow or statRowCount >= statColumns then
+			statRow = New("Frame", {
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 0, STAT_HEIGHT),
+				LayoutOrder = NextOrder(),
+				Parent = content,
+			})
+			Row(statRow, 8)
+			statRowCount = 0
+		end
+		statRowCount = statRowCount + 1
+		local row = statRow
+		local color = cfg.Color or theme.Accent
+
+		local card = New("Frame", {
+			BackgroundColor3 = theme.SectionBackground,
+			Size = UDim2.fromScale(0, 1),
+			LayoutOrder = statRowCount,
+			Parent = row,
+		})
+		New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = card })
+		Round(card, 8)
+		Stroke(card, theme.Border, 1)
+
+		local head = New("Frame", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(10, 9),
+			Size = UDim2.new(1, -20, 0, 14),
+			Parent = card,
+		})
+		Row(head, 6)
+		local iconSlot = New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(14, 14), LayoutOrder = 1, Visible = cfg.Icon ~= nil, Parent = head })
+		local statIcon = Icon(cfg.Icon, 14, color, { Parent = iconSlot })
+		local statTitle = Label({
+			Text = cfg.Title or "",
+			TextSize = 11.5,
+			TextColor3 = theme.SubText,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Size = UDim2.fromScale(0, 1),
+			LayoutOrder = 2,
+			Parent = head,
+		})
+		New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill, Parent = statTitle })
+		local valueLabel = Label({
+			FontFace = Fonts.Bold,
+			TextSize = 16,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Position = UDim2.fromOffset(10, 28),
+			Size = UDim2.new(1, -20, 0, 20),
+			Parent = card,
+		})
+
+		local Stat = { Instance = card }
+		function Stat:SetValue(value)
+			Stat.Value = value
+			valueLabel.Text = FormatStat(value, cfg)
+		end
+		function Stat:Increment(amount)
+			Stat:SetValue((tonumber(Stat.Value) or 0) + (amount or 1))
+		end
+		function Stat:SetTitle(text)
+			statTitle.Text = tostring(text)
+		end
+		function Stat:SetIcon(name)
+			if statIcon then statIcon:Destroy() end
+			statIcon = Icon(name, 14, color, { Parent = iconSlot })
+			iconSlot.Visible = statIcon ~= nil
+		end
+		-- A row whose stats are all hidden shouldn't leave its gap behind.
+		local function RefreshRow()
+			local anyVisible = false
+			for _, child in ipairs(row:GetChildren()) do
+				if child:IsA("Frame") and child.Visible then anyVisible = true end
+			end
+			row.Visible = anyVisible
+		end
+		function Stat:SetVisible(visible)
+			card.Visible = visible and true or false
+			RefreshRow()
+		end
+		function Stat:Destroy()
+			card:Destroy()
+			RefreshRow()
+		end
+		Stat:SetValue(cfg.Value == nil and 0 or cfg.Value)
+		return Stat
+	end
+
+	function Stats:AddGraph(cfg)
+		cfg = cfg or {}
+		local Graph, card, head = TitledCard(cfg)
+		head.Visible = true
+		Pad(card, 10)
+		local color = cfg.Color or theme.Accent
+		local maxPoints = cfg.MaxPoints or 30
+		local data = {}
+
+		New("UIFlexItem", {
+			FlexMode = Enum.UIFlexMode.Fill,
+			Parent = New("Frame", { BackgroundTransparency = 1, Size = UDim2.new(), LayoutOrder = 3, Parent = head }),
+		})
+		local valueLabel = Label({
+			FontFace = Fonts.Bold,
+			TextSize = 12,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromScale(0, 1),
+			LayoutOrder = 4,
+			Parent = head,
+		})
+
+		local plot = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, cfg.Height or 80),
+			Parent = card,
+		})
+		for _, y in ipairs({ 0, 0.5, 1 }) do
+			New("Frame", {
+				BackgroundColor3 = theme.Divider,
+				AnchorPoint = Vector2.new(0, y),
+				Position = UDim2.fromScale(0, y),
+				Size = UDim2.new(1, 0, 0, 1),
+				Parent = plot,
+			})
+		end
+		local function RangeLabel(y, offset)
+			return Label({
+				TextSize = 10,
+				TextColor3 = theme.DimText,
+				AnchorPoint = Vector2.new(0, y),
+				Position = UDim2.new(0, 2, y, offset),
+				Size = UDim2.new(1, -4, 0, 12),
+				ZIndex = 4,
+				Parent = plot,
+			})
+		end
+		local highLabel, lowLabel = RangeLabel(0, 3), RangeLabel(1, -3)
+		local endDot = New("Frame", {
+			BackgroundColor3 = color,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Size = UDim2.fromOffset(6, 6),
+			Visible = false,
+			ZIndex = 3,
+			Parent = plot,
+		})
+		Pill(endDot)
+		AddShadow(endDot, { Color = color, Transparency = 0.4, Blur = 8 })
+
+		-- Pools, grown as needed: a push moves these instead of rebuilding them.
+		local segments, columns = {}, {}
+
+		local function Redraw()
+			if Stats.Destroyed then return end
+			local w, h = plot.AbsoluteSize.X, plot.AbsoluteSize.Y
+			local count = #data
+
+			local low, high = cfg.Min or math.huge, cfg.Max or -math.huge
+			for _, value in ipairs(data) do
+				if not cfg.Min then low = math.min(low, value) end
+				if not cfg.Max then high = math.max(high, value) end
+			end
+			highLabel.Text = count > 0 and FormatStat(high, cfg) or ""
+			lowLabel.Text = count > 0 and FormatStat(low, cfg) or ""
+
+			local span = high - low
+			local function X(i)
+				return count > 1 and (i - 1) / (count - 1) * w or w
+			end
+			local function Y(i)
+				local t = span > 0 and math.clamp((data[i] - low) / span, 0, 1) or 0.5
+				return GRAPH_INSET + (1 - t) * (h - GRAPH_INSET * 2)
+			end
+
+			-- The line: thin rotated frames between neighbouring points.
+			for i = 1, count - 1 do
+				local x1, y1, x2, y2 = X(i), Y(i), X(i + 1), Y(i + 1)
+				local segment = segments[i]
+				if not segment then
+					segment = New("Frame", {
+						BackgroundColor3 = color,
+						AnchorPoint = Vector2.new(0.5, 0.5),
+						ZIndex = 2,
+						Parent = plot,
+					})
+					segments[i] = segment
+				end
+				segment.Position = UDim2.fromOffset((x1 + x2) / 2, (y1 + y2) / 2)
+				segment.Size = UDim2.fromOffset(math.sqrt((x2 - x1) ^ 2 + (y2 - y1) ^ 2) + 1, 2)
+				segment.Rotation = math.deg(math.atan2(y2 - y1, x2 - x1))
+				segment.Visible = true
+			end
+			for i = math.max(count, 1), #segments do
+				segments[i].Visible = false
+			end
+
+			-- The fill: narrow fading columns that follow the line's height.
+			local columnCount = count > 1 and math.ceil(w / GRAPH_FILL_STEP) or 0
+			for c = 1, columnCount do
+				local left = (c - 1) * GRAPH_FILL_STEP
+				local columnWidth = math.min(GRAPH_FILL_STEP, w - left)
+				local position = math.min((left + columnWidth / 2) / w * (count - 1) + 1, count)
+				local i = math.min(math.floor(position), count - 1)
+				local y1, y2 = Y(i), Y(i + 1)
+				local top = y1 + (y2 - y1) * (position - i)
+				local column = columns[c]
+				if not column then
+					column = New("Frame", { BackgroundColor3 = color, Parent = plot })
+					New("UIGradient", {
+						Rotation = 90,
+						Transparency = NumberSequence.new(0.75, 1),
+						Parent = column,
+					})
+					columns[c] = column
+				end
+				column.Position = UDim2.fromOffset(left, top)
+				column.Size = UDim2.fromOffset(columnWidth, h - top)
+				column.Visible = true
+			end
+			for c = columnCount + 1, #columns do
+				columns[c].Visible = false
+			end
+
+			endDot.Visible = count > 0
+			if count > 0 then
+				endDot.Position = UDim2.fromOffset(X(count), Y(count))
+			end
+		end
+
+		-- Several pushes in one frame only draw once.
+		local queued = false
+		local function QueueRedraw()
+			if queued then return end
+			queued = true
+			task.defer(function()
+				queued = false
+				Redraw()
+			end)
+		end
+		plot:GetPropertyChangedSignal("AbsoluteSize"):Connect(QueueRedraw)
+
+		local function ShowLatest()
+			Graph.Value = data[#data]
+			valueLabel.Text = Graph.Value and FormatStat(Graph.Value, cfg) or ""
+			QueueRedraw()
+		end
+
+		function Graph:Push(value)
+			value = tonumber(value)
+			if not value then return end
+			table.insert(data, value)
+			while #data > maxPoints do
+				table.remove(data, 1)
+			end
+			ShowLatest()
+		end
+		function Graph:SetData(points)
+			table.clear(data)
+			for _, value in ipairs(points or {}) do
+				local number = tonumber(value)
+				if number then table.insert(data, number) end
+			end
+			while #data > maxPoints do
+				table.remove(data, 1)
+			end
+			ShowLatest()
+		end
+		function Graph:Clear()
+			Graph:SetData({})
+		end
+
+		Graph:SetData(cfg.Data)
+		return Graph
+	end
+
+	function Stats:AddImageHolder(cfg)
+		cfg = cfg or {}
+		local Holder, card = TitledCard(cfg)
+		Pad(card, 8)
+		List(card)
+		local columns = cfg.Columns or 4
+		local GAP = 6
+
+		local emptyLabel = Label({
+			Text = "Nothing here yet",
+			TextSize = 11.5,
+			TextColor3 = theme.DimText,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Size = UDim2.new(1, 0, 0, 40),
+			Parent = card,
+		})
+		local grid = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = card,
+		})
+		-- Cells are a pixel narrower than an exact share: rounding can otherwise
+		-- make a full row a pixel too wide, which wraps its last tile.
+		New("UIGridLayout", {
+			CellPadding = UDim2.fromOffset(GAP, GAP),
+			CellSize = UDim2.new(1 / columns, -math.floor(GAP * (columns - 1) / columns) - 1, 0, cfg.TileHeight or 68),
+			FillDirectionMaxCells = columns,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Parent = grid,
+		})
+
+		local tiles = {}
+		local tileOrder = 0
+
+		function Holder:AddImage(item)
+			item = item or {}
+			tileOrder = tileOrder + 1
+			emptyLabel.Visible = false
+			-- Left unparented once the frame is destroyed, so a script's refresh
+			-- loop keeps running instead of erroring on a locked parent.
+			local tile = New("Frame", {
+				BackgroundColor3 = theme.ElementBackground,
+				LayoutOrder = tileOrder,
+				Parent = not Stats.Destroyed and grid or nil,
+			})
+			Round(tile, 6)
+			local ring = Stroke(tile, item.Color or theme.Border, 1)
+			local caption = Label({
+				Text = item.Title or "",
+				TextSize = 10,
+				TextColor3 = theme.SubText,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				AnchorPoint = Vector2.new(0, 1),
+				Position = UDim2.new(0, 4, 1, -4),
+				Size = UDim2.new(1, -8, 0, 12),
+				Visible = item.Title ~= nil,
+				Parent = tile,
+			})
+			local badge = Label({
+				FontFace = Fonts.Bold,
+				TextSize = 10,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				BackgroundColor3 = theme.Header,
+				BackgroundTransparency = 0.15,
+				AnchorPoint = Vector2.new(1, 0),
+				Position = UDim2.new(1, -3, 0, 3),
+				AutomaticSize = Enum.AutomaticSize.X,
+				Size = UDim2.fromOffset(0, 14),
+				Visible = false,
+				ZIndex = 3,
+				Parent = tile,
+			})
+			Pill(badge)
+			Pad(badge, 4, 0, 4, 0)
+
+			local image
+			local Tile = { Instance = tile }
+			local function PlaceImage()
+				if image then
+					image.Size = UDim2.new(1, -12, 1, caption.Visible and -24 or -12)
+				end
+			end
+			function Tile:SetImage(source)
+				if image then image:Destroy() end
+				image = Icon(source, 40, nil, {
+					AnchorPoint = Vector2.new(0.5, 0),
+					Position = UDim2.new(0.5, 0, 0, 6),
+					ScaleType = Enum.ScaleType.Fit,
+					Parent = tile,
+				})
+				PlaceImage()
+			end
+			function Tile:SetTitle(text)
+				caption.Text = text and tostring(text) or ""
+				caption.Visible = text ~= nil
+				PlaceImage()
+			end
+			function Tile:SetCount(count)
+				badge.Text = count and ("x" .. FormatNumber(count)) or ""
+				badge.Visible = count ~= nil
+			end
+			function Tile:SetColor(ringColor)
+				ring.Color = ringColor or theme.Border
+			end
+			function Tile:SetVisible(visible)
+				tile.Visible = visible and true or false
+			end
+			function Tile:Destroy()
+				tile:Destroy()
+				local index = table.find(tiles, Tile)
+				if index then table.remove(tiles, index) end
+				emptyLabel.Visible = #tiles == 0
+			end
+
+			Tile:SetImage(item.Image)
+			Tile:SetCount(item.Count)
+			table.insert(tiles, Tile)
+			return Tile
+		end
+
+		function Holder:Clear()
+			for i = #tiles, 1, -1 do
+				tiles[i]:Destroy()
+			end
+		end
+		--- Replaces every tile; meant for re-showing an inventory that changed.
+		function Holder:SetImages(items)
+			Holder:Clear()
+			for _, item in ipairs(items or {}) do
+				Holder:AddImage(item)
+			end
+		end
+
+		Holder:SetImages(cfg.Images)
+		return Holder
+	end
+
+	function Stats:AddText(cfg)
+		cfg = cfg or {}
+		local Text, card = TitledCard(cfg)
+		Pad(card, 10, 8, 10, 8)
+		local body = Label({
+			Text = cfg.Content or "",
+			TextSize = 12,
+			TextColor3 = theme.SubText,
+			TextWrapped = true,
+			RichText = true,
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = card,
+		})
+		function Text:SetContent(text)
+			body.Text = tostring(text)
+		end
+		return Text
+	end
+
+	return Stats
+end
+
+--=============================================================================
 -- WINDOW
 --=============================================================================
 
@@ -957,7 +1961,7 @@ function Ren:CreateWindow(config)
 
 	-- Fixed starting size: config.Size is deliberately ignored (NovaUI scripts
 	-- pass sizes tuned for its sidebar layout). The corner grip still resizes.
-	local size = UDim2.fromOffset(600, 380)
+	local size = UDim2.fromOffset(600, WINDOW_HEIGHT)
 	local HEADER_HEIGHT = 50
 	local TABBAR_HEIGHT = 40
 	local CORNER = 10
@@ -1174,12 +2178,18 @@ function Ren:CreateWindow(config)
 		return point.X >= p.X and point.X <= p.X + s.X and point.Y >= p.Y and point.Y <= p.Y + s.Y
 	end
 
-	-- Whether a processed press was meant for a UI rather than the game:
-	-- typing in a text box, or a click on this window or an open popup.
+	-- Whether a processed press was meant for a UI rather than the game: the
+	-- Roblox menu, chat, a text box, or a click on this window, an open popup
+	-- or a floating frame.
 	local function IsUiPress(input)
+		if GuiService.MenuIsOpen or ChatInputFocused() then return true end
 		local kind = input.UserInputType
 		if kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.MouseButton2 or kind == Enum.UserInputType.MouseButton3 then
-			return ScreenGui.Enabled and (#PopupStack > 0 or PointIn(Main, input.Position))
+			if ScreenGui.Enabled and (#PopupStack > 0 or PointIn(Main, input.Position)) then return true end
+			for _, frame in ipairs(FloatingFrames) do
+				if frame.Visible and PointIn(frame.Instance, input.Position) then return true end
+			end
+			return false
 		end
 		return UserInputService:GetFocusedTextBox() ~= nil
 	end
@@ -1316,41 +2326,6 @@ function Ren:CreateWindow(config)
 	end
 
 	-- Square icon-only button: transparent at rest, tinted on hover.
-	local function IconButton(parent, iconName, sizePx, iconSize, hoverColor)
-		local btn = New("TextButton", {
-			Text = "",
-			AutoButtonColor = false,
-			BackgroundColor3 = theme.ElementBackground,
-			BackgroundTransparency = 1,
-			Size = UDim2.fromOffset(sizePx, sizePx),
-			Parent = parent,
-		})
-		Round(btn, 6)
-		local image = Icon(iconName, iconSize or 14, theme.SubText, {
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			Parent = btn,
-		})
-		btn.MouseEnter:Connect(function()
-			Tween(btn, { BackgroundTransparency = 0 }, 0.1)
-			if image then Tween(image, { ImageColor3 = hoverColor or theme.Text }, 0.1) end
-		end)
-		btn.MouseLeave:Connect(function()
-			Tween(btn, { BackgroundTransparency = 1 }, 0.1)
-			if image then Tween(image, { ImageColor3 = theme.SubText }, 0.1) end
-		end)
-		local handle = { Instance = btn }
-		function handle.SetIcon(name)
-			if image then image:Destroy() end
-			image = Icon(name, iconSize or 14, theme.SubText, {
-				AnchorPoint = Vector2.new(0.5, 0.5),
-				Position = UDim2.fromScale(0.5, 0.5),
-				Parent = btn,
-			})
-		end
-		return handle
-	end
-
 	local function Separator(parent, layoutOrder)
 		return New("Frame", {
 			BackgroundColor3 = theme.Border,
@@ -1373,26 +2348,10 @@ function Ren:CreateWindow(config)
 		Parent = HeaderRow,
 	})
 	Row(Brand, 8)
-	-- A Lucide name gets the accent tint; a real image keeps its colors.
 	local logoImage = config.Logo or Ren.Logo
 	local logoIsGlyph = type(logoImage) == "string" and not logoImage:find("://")
 	do
-		local logoSize = logoIsGlyph and 18 or 22
-		local logoHolder = New("Frame", {
-			BackgroundTransparency = 1,
-			Size = UDim2.fromOffset(logoSize, logoSize),
-			LayoutOrder = 1,
-			Parent = Brand,
-		})
-		local logo = Icon(logoImage, logoSize, logoIsGlyph and theme.Accent or nil, {
-			AnchorPoint = Vector2.new(0.5, 0.5),
-			Position = UDim2.fromScale(0.5, 0.5),
-			ZIndex = 2,
-			Parent = logoHolder,
-		})
-		if logo then
-			AddGlow(logoHolder, logoSize, theme.Accent)
-		end
+		AddLogo(Brand, logoImage, 1)
 		Label({
 			Text = config.Title or "Ren",
 			FontFace = Fonts.Bold,
@@ -1565,43 +2524,7 @@ function Ren:CreateWindow(config)
 	Window._searchText = ""
 	Window.Search = { Box = SearchBox }
 
-	-- While it's being dragged the window turns see-through so what's behind
-	-- it stays visible (DragTransparency, default 0.5; false turns it off).
-	-- Main is lifted into a screen-sized CanvasGroup for the drag only, so it
-	-- fades as one flat layer, stroke and shadow included; living in a
-	-- CanvasGroup all the time would render the whole window via a texture.
-	local dragTransparency = config.DragTransparency
-	if dragTransparency == nil then dragTransparency = 0.5 end
-	local DragGroup
-	if dragTransparency then
-		local ok, group = pcall(New, "CanvasGroup", {
-			Name = "DragFade",
-			BackgroundTransparency = 1,
-			Size = UDim2.fromScale(1, 1),
-			Visible = false,
-			Parent = ScreenGui,
-		})
-		DragGroup = ok and group or nil
-	end
-	local dragFadeToken = 0
-	local function SetDragFade(dragging)
-		if not DragGroup then return end
-		dragFadeToken = dragFadeToken + 1
-		local token = dragFadeToken
-		if dragging then
-			DragGroup.ZIndex = Main.ZIndex
-			DragGroup.Visible = true
-			Main.Parent = DragGroup
-			Tween(DragGroup, { GroupTransparency = dragTransparency }, 0.12)
-		else
-			Tween(DragGroup, { GroupTransparency = 0 }, 0.12)
-			task.delay(0.12, function()
-				if token ~= dragFadeToken then return end
-				Main.Parent = ScreenGui
-				DragGroup.Visible = false
-			end)
-		end
-	end
+	local SetDragFade = DragFade(Main, ScreenGui, config.DragTransparency)
 
 	local function CanDrag()
 		return not Window._fullscreen
@@ -1858,6 +2781,9 @@ function Ren:CreateWindow(config)
 			if conn.Connected then conn:Disconnect() end
 		end
 		table.clear(AllConnections)
+		for i = #FloatingFrames, 1, -1 do
+			FloatingFrames[i]:Destroy()
+		end
 		ScreenGui:Destroy()
 		Ren.Unloaded = true
 	end
